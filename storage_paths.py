@@ -4,9 +4,9 @@
 import os
 
 from storage_errors import (
+    classify_storage_error,
     is_already_exists_error,
     is_invalid_name_error,
-    is_missing_path_error,
 )
 from utils import handle_error_and_notify
 
@@ -132,7 +132,10 @@ class StoragePathService:
                         elif item.is_dir:
                             _list_dir(item.path)
                 except Exception as exc:
-                    if path == normalized_dir_path and is_missing_path_error(exc):
+                    error_info = classify_storage_error(exc)
+                    if path == normalized_dir_path and (
+                        error_info.kind == "missing_path" or error_info.code == "31023"
+                    ):
                         return
                     handle_error_and_notify(
                         exc,

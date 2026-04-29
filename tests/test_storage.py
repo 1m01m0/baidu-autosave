@@ -19,6 +19,7 @@ if "baidupcs_py" not in sys.modules:
 from storage import BaiduStorage
 from storage_client import BaiduClientAdapter
 from storage_errors import classify_storage_error, parse_share_error
+from storage_paths import StoragePathService
 from storage_rules import apply_regex_rules, should_include_folder
 from storage_shares import SharedPathService
 from utils import format_error_info
@@ -201,6 +202,47 @@ class SharedPathServiceTests(unittest.TestCase):
             ],
             files,
         )
+
+    def test_list_shared_files_reports_directory_progress(self):
+        root_dir = SimpleNamespace(
+            path="/single-share",
+            is_dir=True,
+            uk=1,
+            share_id=2,
+            bdstoken="token",
+        )
+        nested_file = SimpleNamespace(
+            path="/single-share/单集.mp4",
+            is_dir=False,
+            fs_id=11,
+            size=456,
+            md5="def",
+        )
+        progress_callback = Mock()
+        self.service.client.list_shared_paths.return_value = [nested_file]
+
+        files = self.service.list_shared_files([root_dir], progress_callback=progress_callback)
+
+        self.assertEqual(1, len(files))
+        messages = [call.args[1] for call in progress_callback.call_args_list]
+        self.assertTrue(any("开始获取共享文件列表，共 1 个入口" in msg for msg in messages))
+        self.assertTrue(any("正在获取共享目录第 1 页: /single-share" in msg for msg in messages))
+        self.assertTrue(any("共享目录获取完成: /single-share" in msg for msg in messages))
+        self.assertTrue(any("共享文件列表获取完成：扫描 1 个目录，发现 1 个文件" in msg for msg in messages))
+
+
+class StoragePathServiceTests(unittest.TestCase):
+    def test_list_local_files_treats_root_31023_as_empty_dir(self):
+        client = Mock()
+        client.list.side_effect = RuntimeError("error_code: 31023, message: 输入参数错误")
+        service = StoragePathService(client)
+
+        with patch("storage_paths.handle_error_and_notify") as notify:
+            result = service.list_local_files("/考公/2026/政治理论常识背诵手册", use_cache=True)
+
+        self.assertEqual([], result)
+        client.list.assert_called_once_with("/考公/2026/政治理论常识背诵手册")
+        notify.assert_not_called()
 
 
 class WeChatNotifierTests(unittest.TestCase):

@@ -463,7 +463,7 @@ class BaiduStorage:
 
         shared_paths = self.share_service.load_shared_paths(share_url, pwd)
         if progress_callback:
-            progress_callback("info", "开始获取共享文件文件列表")
+            progress_callback("info", "开始获取共享文件列表")
         if not shared_paths:
             handle_error_and_notify(
                 ValueError("获取分享文件列表失败"),
@@ -478,7 +478,7 @@ class BaiduStorage:
         share_id = shared_paths[0].share_id
         bdstoken = shared_paths[0].bdstoken
         shared_files_info = self.share_service.list_shared_files(
-            shared_paths, folder_filter
+            shared_paths, folder_filter, progress_callback
         )
 
         if progress_callback:
