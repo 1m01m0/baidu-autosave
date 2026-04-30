@@ -16,6 +16,7 @@ class StoragePathService:
         self.client = client
         self.wechat_notifier = wechat_notifier
         self._local_files_cache = local_files_cache if local_files_cache is not None else {}
+        self._ensured_dirs = set()
 
     @staticmethod
     def normalize_path(path, file_only=False):
@@ -53,10 +54,14 @@ class StoragePathService:
                 prefixes.append(curr)
 
             for seg in prefixes:
+                if seg in self._ensured_dirs:
+                    continue
                 try:
                     self.client.makedir(seg)
+                    self._ensured_dirs.add(seg)
                 except Exception as exc:
                     if is_already_exists_error(exc):
+                        self._ensured_dirs.add(seg)
                         continue
                     if is_invalid_name_error(exc):
                         handle_error_and_notify(
@@ -69,6 +74,7 @@ class StoragePathService:
                         return False
                     try:
                         self.client.list(seg)
+                        self._ensured_dirs.add(seg)
                         continue
                     except Exception:
                         handle_error_and_notify(

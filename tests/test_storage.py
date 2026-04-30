@@ -1,3 +1,4 @@
+import os
 import sys
 import types
 import unittest
@@ -16,7 +17,13 @@ if "baidupcs_py" not in sys.modules:
     sys.modules["baidupcs_py"] = baidupcs_module
     sys.modules["baidupcs_py.baidupcs"] = baidupcs_submodule
 
-from storage import BaiduStorage, FREQUENCY_LIMIT_DELAY, RENAME_DELAY
+from storage import (
+    BaiduStorage,
+    BATCH_SHARE_DELAY,
+    FREQUENCY_LIMIT_DELAY,
+    RENAME_DELAY,
+    _read_non_negative_float_env,
+)
 from storage_client import BaiduClientAdapter
 from storage_errors import classify_storage_error, parse_share_error
 from storage_paths import StoragePathService
@@ -79,6 +86,17 @@ class BaiduStoragePureMethodTests(unittest.TestCase):
 
         already_exists = classify_storage_error("error_code: 31061, message: 文件已经存在")
         self.assertEqual("already_exists", already_exists.kind)
+
+    def test_read_non_negative_float_env_falls_back_for_invalid_values(self):
+        env_name = "TRANSFERSHARE_TEST_DELAY"
+        with patch.dict(os.environ, {env_name: "0.25"}):
+            self.assertEqual(0.25, _read_non_negative_float_env(env_name, 2))
+        with patch.dict(os.environ, {env_name: "bad"}):
+            self.assertEqual(2, _read_non_negative_float_env(env_name, 2))
+        with patch.dict(os.environ, {env_name: "-1"}):
+            self.assertEqual(2, _read_non_negative_float_env(env_name, 2))
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(2, _read_non_negative_float_env(env_name, 2))
 
     def test_format_error_info_masks_share_urls_and_pwd(self):
         error = ValueError(
@@ -308,6 +326,23 @@ class StoragePathServiceTests(unittest.TestCase):
         client.list.assert_not_called()
         notify.assert_not_called()
 
+    def test_ensure_dir_exists_caches_confirmed_prefixes(self):
+        client = Mock()
+        service = StoragePathService(client)
+
+        with patch("storage_paths.handle_error_and_notify") as notify:
+            first_result = service.ensure_dir_exists("/save/a")
+            second_result = service.ensure_dir_exists("/save/a/b")
+
+        self.assertTrue(first_result)
+        self.assertTrue(second_result)
+        self.assertEqual(
+            [call("/save"), call("/save/a"), call("/save/a/b")],
+            client.makedir.call_args_list,
+        )
+        client.list.assert_not_called()
+        notify.assert_not_called()
+
     def test_list_local_files_treats_root_31023_as_empty_dir(self):
         client = Mock()
         client.list.side_effect = RuntimeError("error_code: 31023, message: 输入参数错误")
@@ -485,15 +520,18 @@ class BaiduStorageFlowTests(unittest.TestCase):
         )
         progress_callback = Mock()
 
-        result = self.storage.transfer_multiple_shares(
-            [
-                {"share_url": "u1"},
-                {"share_url": "u2"},
-                {"share_url": "u3"},
-            ],
-            progress_callback,
-        )
+        with patch("storage.time.sleep") as sleep:
+            result = self.storage.transfer_multiple_shares(
+                [
+                    {"share_url": "u1"},
+                    {"share_url": "u2"},
+                    {"share_url": "u3"},
+                ],
+                progress_callback,
+            )
 
+        sleep.assert_has_calls([call(BATCH_SHARE_DELAY), call(BATCH_SHARE_DELAY)])
+        self.assertEqual(2, sleep.call_count)
         self.assertFalse(result["success"])
         self.assertTrue(result["partial"])
         self.assertEqual(1, result["success_count"])

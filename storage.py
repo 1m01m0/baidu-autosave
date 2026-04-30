@@ -27,10 +27,24 @@ except ImportError:
         return logging.getLogger(name)
 
 
+def _read_non_negative_float_env(name, default):
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        return default
+    return value if value >= 0 else default
+
+
 # 常量定义
 RATE_LIMIT_WAIT_TIME = 10
-FREQUENCY_LIMIT_DELAY = 1
-RENAME_DELAY = 0.5
+FREQUENCY_LIMIT_DELAY = _read_non_negative_float_env(
+    "TRANSFERSHARE_TRANSFER_GROUP_DELAY", 1
+)
+RENAME_DELAY = _read_non_negative_float_env("TRANSFERSHARE_RENAME_DELAY", 0.5)
+BATCH_SHARE_DELAY = _read_non_negative_float_env("TRANSFERSHARE_BATCH_SHARE_DELAY", 2)
 
 
 class BaiduStorage:
@@ -295,7 +309,7 @@ class BaiduStorage:
                     self._record_batch_result(counters, result_record)
                     results.append(result_record)
                     if index < total_count:
-                        time.sleep(2)
+                        time.sleep(BATCH_SHARE_DELAY)
                 except Exception as e:
                     error_info = classify_storage_error(e)
                     error_msg = f"处理第 {index} 个分享链接时发生异常: {error_info.message}"
