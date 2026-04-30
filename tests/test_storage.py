@@ -428,6 +428,37 @@ class StoragePathServiceTests(unittest.TestCase):
         client.list.assert_not_called()
         notify.assert_not_called()
 
+    def test_ensure_dir_exists_retries_transient_empty_response(self):
+        client = Mock()
+        client.makedir.side_effect = [
+            RuntimeError("Expecting value: line 1 column 1 (char 0)"),
+            None,
+        ]
+        client.list.side_effect = [RuntimeError("error_code: 31066, message: 文件不存在")]
+        service = StoragePathService(client)
+
+        with patch("storage_paths.time.sleep") as sleep, patch("storage_paths.handle_error_and_notify") as notify:
+            result = service.ensure_dir_exists("/save")
+
+        self.assertTrue(result)
+        self.assertEqual([call("/save"), call("/save")], client.makedir.call_args_list)
+        client.list.assert_called_once_with("/save")
+        sleep.assert_called_once()
+        notify.assert_not_called()
+
+    def test_ensure_dir_exists_confirms_after_transient_empty_response(self):
+        client = Mock()
+        client.makedir.side_effect = RuntimeError("Expecting value: line 1 column 1 (char 0)")
+        client.list.return_value = []
+        service = StoragePathService(client)
+
+        with patch("storage_paths.handle_error_and_notify") as notify:
+            result = service.ensure_dir_exists("/save")
+
+        self.assertTrue(result)
+        client.list.assert_called_once_with("/save")
+        notify.assert_not_called()
+
     def test_list_local_files_treats_root_31023_as_empty_dir(self):
         client = Mock()
         client.list.side_effect = RuntimeError("error_code: 31023, message: 输入参数错误")

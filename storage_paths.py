@@ -3,6 +3,7 @@
 
 import os
 import posixpath
+import time
 
 from storage_errors import (
     classify_storage_error,
@@ -10,6 +11,10 @@ from storage_errors import (
     is_invalid_name_error,
 )
 from utils import handle_error_and_notify
+
+
+DIR_OPERATION_MAX_ATTEMPTS = 3
+DIR_OPERATION_RETRY_DELAY = 1
 
 
 class StoragePathService:
@@ -30,6 +35,73 @@ class StoragePathService:
             return path
         except Exception:
             return path
+
+    @staticmethod
+    def _is_transient_dir_error(exc):
+        error_info = classify_storage_error(exc)
+        raw_message = error_info.raw_message.lower()
+        error_type = type(exc).__name__.lower()
+        return (
+            error_info.kind == "network"
+            or "jsondecodeerror" in error_type
+            or "expecting value" in raw_message
+        )
+
+    def _list_dir_exists(self, path):
+        try:
+            self.client.list(path)
+            return True, None
+        except Exception as exc:
+            error_info = classify_storage_error(exc)
+            if error_info.kind == "missing_path" or error_info.code == "31023":
+                return False, exc
+            return None, exc
+
+    def _ensure_single_dir_exists(self, path):
+        last_error = None
+        for attempt in range(DIR_OPERATION_MAX_ATTEMPTS):
+            try:
+                self.client.makedir(path)
+                self._ensured_dirs.add(path)
+                return True
+            except Exception as exc:
+                if is_already_exists_error(exc):
+                    self._ensured_dirs.add(path)
+                    return True
+                if is_invalid_name_error(exc):
+                    handle_error_and_notify(
+                        ValueError(f"创建目录失败，文件名非法: {path}"),
+                        "创建目录失败: 文件名非法",
+                        self.wechat_notifier,
+                        None,
+                        collect=True,
+                    )
+                    return False
+
+                last_error = exc
+                exists, list_error = self._list_dir_exists(path)
+                if exists:
+                    self._ensured_dirs.add(path)
+                    return True
+                if list_error is not None and exists is None:
+                    last_error = list_error
+
+                should_retry = self._is_transient_dir_error(exc) or (
+                    list_error is not None and self._is_transient_dir_error(list_error)
+                )
+                if should_retry and attempt < DIR_OPERATION_MAX_ATTEMPTS - 1:
+                    time.sleep(DIR_OPERATION_RETRY_DELAY)
+                    continue
+                break
+
+        handle_error_and_notify(
+            last_error,
+            f"创建目录出错\n目录路径: {path}",
+            self.wechat_notifier,
+            None,
+            collect=True,
+        )
+        return False
 
     def ensure_dir_exists(self, path):
         try:
@@ -57,35 +129,8 @@ class StoragePathService:
             for seg in prefixes:
                 if seg in self._ensured_dirs:
                     continue
-                try:
-                    self.client.makedir(seg)
-                    self._ensured_dirs.add(seg)
-                except Exception as exc:
-                    if is_already_exists_error(exc):
-                        self._ensured_dirs.add(seg)
-                        continue
-                    if is_invalid_name_error(exc):
-                        handle_error_and_notify(
-                            ValueError(f"创建目录失败，文件名非法: {seg}"),
-                            "创建目录失败: 文件名非法",
-                            self.wechat_notifier,
-                            None,
-                            collect=True,
-                        )
-                        return False
-                    try:
-                        self.client.list(seg)
-                        self._ensured_dirs.add(seg)
-                        continue
-                    except Exception:
-                        handle_error_and_notify(
-                            exc,
-                            f"创建目录出错\n目录路径: {seg}",
-                            self.wechat_notifier,
-                            None,
-                            collect=True,
-                        )
-                        return False
+                if not self._ensure_single_dir_exists(seg):
+                    return False
 
             return True
         except Exception as exc:
