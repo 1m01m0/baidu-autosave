@@ -585,7 +585,7 @@ class BaiduStorage:
                 local_files = self.path_service.list_local_files(save_dir, use_cache=True)
             else:
                 local_files = self.path_service.list_local_files_in_dirs(
-                    save_dir, relative_dirs, use_cache=True
+                    save_dir, relative_dirs, use_cache=True, merge_dirs=True
                 )
             if progress_callback:
                 if relative_dirs is None:

@@ -286,6 +286,72 @@ class StoragePathServiceTests(unittest.TestCase):
         )
         self.assertEqual([call("/save/A"), call("/save/B/C")], client.list.call_args_list)
 
+    def test_list_local_files_in_dirs_merges_sibling_dirs_when_enabled(self):
+        client = Mock()
+        listings = {
+            "/save/A": [
+                SimpleNamespace(is_file=True, is_dir=False, path="/save/A/root.txt", md5="md5-root"),
+                SimpleNamespace(is_file=False, is_dir=True, path="/save/A/1"),
+                SimpleNamespace(is_file=False, is_dir=True, path="/save/A/2"),
+                SimpleNamespace(is_file=False, is_dir=True, path="/save/A/other"),
+            ],
+            "/save/A/1": [
+                SimpleNamespace(is_file=True, is_dir=False, path="/save/A/1/a.txt", md5="md5-a"),
+                SimpleNamespace(is_file=False, is_dir=True, path="/save/A/1/sub"),
+            ],
+            "/save/A/2": [
+                SimpleNamespace(is_file=True, is_dir=False, path="/save/A/2/b.txt", md5="md5-b")
+            ],
+            "/save/A/other": [
+                SimpleNamespace(is_file=True, is_dir=False, path="/save/A/other/c.txt", md5="md5-c")
+            ],
+        }
+        client.list.side_effect = lambda path: listings[path]
+        service = StoragePathService(client)
+
+        result = service.list_local_files_in_dirs(
+            "/save", {"A/1", "A/2"}, merge_dirs=True
+        )
+
+        self.assertEqual(
+            [
+                {"relative_path": "A/1/a.txt", "file_name": "a.txt", "md5": "md5-a"},
+                {"relative_path": "A/2/b.txt", "file_name": "b.txt", "md5": "md5-b"},
+            ],
+            result,
+        )
+        self.assertEqual([call("/save/A"), call("/save/A/1"), call("/save/A/2")], client.list.call_args_list)
+
+    def test_list_local_files_in_dirs_cache_separates_merge_mode(self):
+        client = Mock()
+        listings = {
+            "/save/A": [
+                SimpleNamespace(is_file=False, is_dir=True, path="/save/A/1"),
+                SimpleNamespace(is_file=False, is_dir=True, path="/save/A/2"),
+            ],
+            "/save/A/1": [
+                SimpleNamespace(is_file=True, is_dir=False, path="/save/A/1/a.txt", md5="md5-a")
+            ],
+            "/save/A/2": [
+                SimpleNamespace(is_file=True, is_dir=False, path="/save/A/2/b.txt", md5="md5-b")
+            ],
+        }
+        client.list.side_effect = lambda path: listings[path]
+        service = StoragePathService(client)
+
+        direct_result = service.list_local_files_in_dirs(
+            "/save", {"A/1", "A/2"}, use_cache=True
+        )
+        merged_result = service.list_local_files_in_dirs(
+            "/save", {"A/1", "A/2"}, use_cache=True, merge_dirs=True
+        )
+
+        self.assertEqual(direct_result, merged_result)
+        self.assertEqual(
+            [call("/save/A/1"), call("/save/A/2"), call("/save/A"), call("/save/A/1"), call("/save/A/2")],
+            client.list.call_args_list,
+        )
+
     def test_list_local_files_in_dirs_handles_root_target_dir(self):
         client = Mock()
         client.list.return_value = [
@@ -422,6 +488,16 @@ class BaiduStorageFlowTests(unittest.TestCase):
         result = self.storage.transfer_share("https://pan.baidu.com/s/abc")
 
         self.assertEqual({"success": False, "error": "创建目录失败: /save"}, result)
+
+    def test_scan_local_files_dict_uses_merged_candidate_dir_scan(self):
+        self.storage.path_service.list_local_files_in_dirs.return_value = []
+
+        result = self.storage._scan_local_files_dict("/save", relative_dirs={"A/1", "A/2"})
+
+        self.assertEqual({}, result)
+        self.storage.path_service.list_local_files_in_dirs.assert_called_once_with(
+            "/save", {"A/1", "A/2"}, use_cache=True, merge_dirs=True
+        )
 
     def test_transfer_share_executes_plan_and_builds_result(self):
         self.storage._normalize_save_dir = Mock(return_value="/save")
