@@ -180,7 +180,7 @@ class SharedPathService:
     def list_shared_dir_children(self, path, uk, share_id, bdstoken):
         return list(self.iter_shared_dir_children(path, uk, share_id, bdstoken))
 
-    def list_shared_dir_files(
+    def iter_shared_dir_files(
         self,
         path,
         uk,
@@ -192,7 +192,6 @@ class SharedPathService:
         stats=None,
         exclude_folder_filter=None,
     ):
-        files = []
         if stats is None:
             stats = self._new_scan_stats()
 
@@ -205,7 +204,7 @@ class SharedPathService:
                     None,
                     collect=False,
                 )
-                return files
+                return
 
             dir_path = getattr(path, "path", path)
             stats["dirs"] += 1
@@ -233,28 +232,26 @@ class SharedPathService:
                         if should_exclude_folder(folder_name, exclude_folder_filter):
                             stats["skipped_dirs"] += 1
                         elif should_include_folder(folder_name, folder_filter):
-                            files.extend(
-                                self.list_shared_dir_files(
-                                    sub_file,
-                                    uk,
-                                    share_id,
-                                    bdstoken,
-                                    folder_filter,
-                                    shared_root,
-                                    progress_callback,
-                                    stats,
-                                    exclude_folder_filter=exclude_folder_filter,
-                                )
+                            yield from self.iter_shared_dir_files(
+                                sub_file,
+                                uk,
+                                share_id,
+                                bdstoken,
+                                folder_filter,
+                                shared_root,
+                                progress_callback,
+                                stats,
+                                exclude_folder_filter=exclude_folder_filter,
                             )
                         else:
                             stats["skipped_dirs"] += 1
                     else:
                         file_info = self._normalize_shared_file_info(sub_file, shared_root)
                         if file_info:
-                            files.append(file_info)
                             stats["files"] += 1
                             if self._should_report_progress(stats):
                                 self._report_scan_progress(progress_callback, stats)
+                            yield file_info
 
         except Exception as exc:
             handle_error_and_notify(
@@ -266,9 +263,33 @@ class SharedPathService:
             )
             raise
 
-        return files
+    def list_shared_dir_files(
+        self,
+        path,
+        uk,
+        share_id,
+        bdstoken,
+        folder_filter=None,
+        shared_root="",
+        progress_callback=None,
+        stats=None,
+        exclude_folder_filter=None,
+    ):
+        return list(
+            self.iter_shared_dir_files(
+                path,
+                uk,
+                share_id,
+                bdstoken,
+                folder_filter,
+                shared_root,
+                progress_callback,
+                stats,
+                exclude_folder_filter=exclude_folder_filter,
+            )
+        )
 
-    def list_shared_files(
+    def iter_shared_files(
         self,
         shared_paths,
         folder_filter=None,
@@ -276,13 +297,12 @@ class SharedPathService:
         exclude_folder_filter=None,
     ):
         if not shared_paths:
-            return []
+            return
 
         uk = shared_paths[0].uk
         share_id = shared_paths[0].share_id
         bdstoken = shared_paths[0].bdstoken
         shared_root = self._resolve_shared_root(shared_paths)
-        files = []
         stats = self._new_scan_stats()
 
         if progress_callback:
@@ -299,18 +319,16 @@ class SharedPathService:
                             "info",
                             f"开始扫描共享入口 {index}/{len(shared_paths)}: {path.path}",
                         )
-                    files.extend(
-                        self.list_shared_dir_files(
-                            path,
-                            uk,
-                            share_id,
-                            bdstoken,
-                            folder_filter,
-                            shared_root,
-                            progress_callback,
-                            stats,
-                            exclude_folder_filter=exclude_folder_filter,
-                        )
+                    yield from self.iter_shared_dir_files(
+                        path,
+                        uk,
+                        share_id,
+                        bdstoken,
+                        folder_filter,
+                        shared_root,
+                        progress_callback,
+                        stats,
+                        exclude_folder_filter=exclude_folder_filter,
                     )
                 else:
                     stats["skipped_dirs"] += 1
@@ -318,8 +336,10 @@ class SharedPathService:
 
             file_info = self._normalize_shared_file_info(path, shared_root)
             if file_info:
-                files.append(file_info)
                 stats["files"] += 1
+                if self._should_report_progress(stats):
+                    self._report_scan_progress(progress_callback, stats)
+                yield file_info
 
         if progress_callback:
             progress_callback(
@@ -328,4 +348,18 @@ class SharedPathService:
                 f"发现 {stats['files']} 个文件，跳过 {stats['skipped_dirs']} 个目录",
             )
 
-        return files
+    def list_shared_files(
+        self,
+        shared_paths,
+        folder_filter=None,
+        progress_callback=None,
+        exclude_folder_filter=None,
+    ):
+        return list(
+            self.iter_shared_files(
+                shared_paths,
+                folder_filter,
+                progress_callback,
+                exclude_folder_filter=exclude_folder_filter,
+            )
+        )

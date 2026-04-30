@@ -4,8 +4,10 @@
 from collections import Counter
 
 import os
-import time
 import posixpath
+import queue
+import threading
+import time
 
 # 添加 WeChatNotifier 和工具方法导入
 from wechat_notifier import WeChatNotifier
@@ -672,18 +674,14 @@ class BaiduStorage:
         if len(warning_samples) < max_samples:
             warning_samples.append(message)
 
-    def _filter_transfer_candidates(
+    def _filter_transfer_candidates_core(
         self,
         candidates,
         local_files_dict,
         summary,
-        progress_callback=None,
+        warning_samples,
     ):
-        if progress_callback:
-            progress_callback("info", "【步骤3/4】准备转存: 对比文件和准备目录")
-
         transfer_list = []
-        warning_samples = []
 
         for candidate in candidates:
             clean_path = candidate["clean_path"]
@@ -747,18 +745,40 @@ class BaiduStorage:
             if need_rename:
                 summary["rename_needed_count"] += 1
 
-        if progress_callback:
-            progress_callback(
-                "info",
-                "候选分析完成："
-                f"共享文件 {summary['shared_count']} 个，候选 {summary['candidate_count']} 个，"
-                f"正则过滤 {summary['regex_filtered_count']} 个，本地已存在 {summary['existing_count']} 个，"
-                f"冲突跳过 {summary['conflict_count']} 个，需要转存 {summary['transfer_needed_count']} 个，"
-                f"其中需重命名 {summary['rename_needed_count']} 个",
-            )
-            for message in warning_samples:
-                progress_callback("warning", message)
+        return transfer_list
 
+    @staticmethod
+    def _report_transfer_candidate_summary(summary, warning_samples, progress_callback=None):
+        if not progress_callback:
+            return
+        progress_callback(
+            "info",
+            "候选分析完成："
+            f"共享文件 {summary['shared_count']} 个，候选 {summary['candidate_count']} 个，"
+            f"正则过滤 {summary['regex_filtered_count']} 个，本地已存在 {summary['existing_count']} 个，"
+            f"冲突跳过 {summary['conflict_count']} 个，需要转存 {summary['transfer_needed_count']} 个，"
+            f"其中需重命名 {summary['rename_needed_count']} 个",
+        )
+        for message in warning_samples:
+            progress_callback("warning", message)
+
+    def _filter_transfer_candidates(
+        self,
+        candidates,
+        local_files_dict,
+        summary,
+        progress_callback=None,
+    ):
+        if progress_callback:
+            progress_callback("info", "【步骤3/4】准备转存: 对比文件和准备目录")
+
+        warning_samples = []
+        transfer_list = self._filter_transfer_candidates_core(
+            candidates, local_files_dict, summary, warning_samples
+        )
+        self._report_transfer_candidate_summary(
+            summary, warning_samples, progress_callback
+        )
         return transfer_list
 
     def _build_transfer_list(
@@ -1477,6 +1497,193 @@ class BaiduStorage:
             "rename_failed_count": 0,
         }
 
+    @staticmethod
+    def _put_stream_queue_item(stream_queue, item, stop_event):
+        while not stop_event.is_set():
+            try:
+                stream_queue.put(item, timeout=0.1)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def _transfer_share_streaming(
+        self,
+        context,
+        share_url,
+        transfer_target_dir,
+        regex_pattern=None,
+        regex_replace=None,
+        folder_filter=None,
+        exclude_folder_filter=None,
+        progress_callback=None,
+    ):
+        if progress_callback:
+            progress_callback("info", "【步骤3/4】准备转存: 流式扫描并对比文件")
+
+        sentinel = object()
+        stream_queue = queue.Queue(maxsize=max(TRANSFER_BATCH_SIZE * 2, 1))
+        stop_event = threading.Event()
+        producer_error = {}
+
+        def producer():
+            try:
+                for file_info in self.share_service.iter_shared_files(
+                    context["shared_paths"],
+                    folder_filter,
+                    progress_callback,
+                    exclude_folder_filter=exclude_folder_filter,
+                ):
+                    if not self._put_stream_queue_item(stream_queue, file_info, stop_event):
+                        return
+            except Exception as exc:
+                producer_error["error"] = exc
+            finally:
+                self._put_stream_queue_item(stream_queue, sentinel, stop_event)
+
+        producer_thread = threading.Thread(
+            target=producer, name="transfershare-share-file-producer", daemon=True
+        )
+        producer_thread.start()
+
+        summary = Counter()
+        warning_samples = []
+        scanned_relative_dirs = set()
+        local_files_dict = {}
+        shared_file_batch = []
+        total_transfer_count = 0
+        transfer_success_count = 0
+        successful_transfer_items = []
+        dir_error = None
+
+        def flush_shared_file_batch():
+            nonlocal total_transfer_count, transfer_success_count, dir_error
+            if not shared_file_batch:
+                return None
+
+            candidates, batch_summary, relative_dirs = self._prepare_transfer_candidates(
+                shared_file_batch,
+                context["shared_paths"],
+                transfer_target_dir,
+                regex_pattern,
+                regex_replace,
+            )
+            shared_file_batch.clear()
+            summary.update(batch_summary)
+
+            new_relative_dirs = set(relative_dirs) - scanned_relative_dirs
+            if new_relative_dirs:
+                local_files_dict.update(
+                    self._scan_local_files_dict(
+                        transfer_target_dir, progress_callback, new_relative_dirs
+                    )
+                )
+                scanned_relative_dirs.update(new_relative_dirs)
+
+            transfer_list = self._filter_transfer_candidates_core(
+                candidates, local_files_dict, summary, warning_samples
+            )
+            if not transfer_list:
+                return None
+
+            dir_error = self._ensure_transfer_dirs(transfer_list)
+            if dir_error:
+                return dir_error
+
+            success_count, successful_items = self._execute_transfer_plan(
+                transfer_list,
+                share_url,
+                context["uk"],
+                context["share_id"],
+                context["bdstoken"],
+                transfer_target_dir,
+                progress_callback,
+            )
+            total_transfer_count += len(transfer_list)
+            transfer_success_count += success_count
+            successful_transfer_items.extend(successful_items)
+            return None
+
+        try:
+            while True:
+                item = stream_queue.get()
+                if item is sentinel:
+                    break
+                shared_file_batch.append(item)
+                if len(shared_file_batch) >= TRANSFER_BATCH_SIZE:
+                    dir_error = flush_shared_file_batch()
+                    if dir_error:
+                        break
+
+            if not dir_error:
+                dir_error = flush_shared_file_batch()
+        finally:
+            stop_event.set()
+            producer_thread.join()
+
+        self._report_transfer_candidate_summary(
+            summary, warning_samples, progress_callback
+        )
+
+        if dir_error:
+            if transfer_success_count > 0:
+                rename_result = self._rename_transferred_files(
+                    successful_transfer_items, transfer_target_dir, progress_callback
+                )
+                result = self._build_transfer_result(
+                    transfer_success_count,
+                    total_transfer_count,
+                    rename_result,
+                    progress_callback,
+                )
+                error_msg = dir_error.get("error", "创建目录失败")
+                result.update(
+                    {
+                        "success": False,
+                        "partial": True,
+                        "error": error_msg,
+                        "message": f"部分转存完成，但准备后续目录失败: {error_msg}",
+                    }
+                )
+                return result
+            return dir_error
+
+        scan_error = producer_error.get("error")
+        if not total_transfer_count:
+            if scan_error:
+                return {"success": False, "error": parse_share_error(scan_error)}
+            if progress_callback:
+                progress_callback("info", "没有找到需要处理的文件")
+            return {
+                "success": True,
+                "skipped": True,
+                "message": "没有新文件需要转存",
+            }
+
+        rename_result = self._rename_transferred_files(
+            successful_transfer_items, transfer_target_dir, progress_callback
+        )
+        result = self._build_transfer_result(
+            transfer_success_count,
+            total_transfer_count,
+            rename_result,
+            progress_callback,
+        )
+        if scan_error:
+            error_msg = parse_share_error(scan_error)
+            if transfer_success_count > 0:
+                result.update(
+                    {
+                        "success": False,
+                        "partial": True,
+                        "error": error_msg,
+                        "message": f"部分转存完成，但扫描共享文件失败: {error_msg}",
+                    }
+                )
+            else:
+                result["error"] = f"{result.get('error', '转存失败')}；扫描共享文件失败: {error_msg}"
+        return result
+
     def transfer_share(
         self,
         share_url,
@@ -1526,60 +1733,14 @@ class BaiduStorage:
                         return fast_path_result
                     transfer_target_dir = self._dir_fast_path_target_dir(context, save_dir)
 
-                context = self._load_share_files(
+                return self._transfer_share_streaming(
                     context,
-                    folder_filter,
-                    progress_callback,
-                    exclude_folder_filter=exclude_folder_filter,
-                )
-                candidates, transfer_summary, relative_dirs = self._prepare_transfer_candidates(
-                    context["shared_files_info"],
-                    context["shared_paths"],
+                    share_url,
                     transfer_target_dir,
                     regex_pattern,
                     regex_replace,
-                )
-                local_files_dict = {}
-                if candidates:
-                    local_files_dict = self._scan_local_files_dict(
-                        transfer_target_dir, progress_callback, relative_dirs
-                    )
-                transfer_list = self._filter_transfer_candidates(
-                    candidates,
-                    local_files_dict,
-                    transfer_summary,
-                    progress_callback,
-                )
-
-                if not transfer_list:
-                    if progress_callback:
-                        progress_callback("info", "没有找到需要处理的文件")
-                    return {
-                        "success": True,
-                        "skipped": True,
-                        "message": "没有新文件需要转存",
-                    }
-
-                dir_error = self._ensure_transfer_dirs(transfer_list)
-                if dir_error:
-                    return dir_error
-
-                success_count, successful_transfer_items = self._execute_transfer_plan(
-                    transfer_list,
-                    share_url,
-                    context["uk"],
-                    context["share_id"],
-                    context["bdstoken"],
-                    transfer_target_dir,
-                    progress_callback,
-                )
-                rename_result = self._rename_transferred_files(
-                    successful_transfer_items, transfer_target_dir, progress_callback
-                )
-                return self._build_transfer_result(
-                    success_count,
-                    len(transfer_list),
-                    rename_result,
+                    folder_filter,
+                    exclude_folder_filter,
                     progress_callback,
                 )
             except Exception as e:
