@@ -169,16 +169,16 @@ class SharedPathService:
                 break
             page += 1
 
-    def list_shared_dir_children(self, path, uk, share_id, bdstoken):
+    def iter_shared_dir_children(self, path, uk, share_id, bdstoken):
         dir_path = getattr(path, "path", path)
-        children = []
         for _, sub_files in self._iter_shared_dir_pages(
             dir_path, uk, share_id, bdstoken
         ):
-            children.extend(
-                self._normalize_shared_child(sub_file) for sub_file in sub_files
-            )
-        return children
+            for sub_file in sub_files:
+                yield self._normalize_shared_child(sub_file)
+
+    def list_shared_dir_children(self, path, uk, share_id, bdstoken):
+        return list(self.iter_shared_dir_children(path, uk, share_id, bdstoken))
 
     def list_shared_dir_files(
         self,

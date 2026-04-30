@@ -1177,6 +1177,34 @@ class BaiduStorage:
             "rename_failed_count": 0,
         }
 
+    def _flush_dir_tree_file_batch(
+        self,
+        file_transfer_list,
+        target_dir,
+        context,
+        share_url,
+        stats,
+        progress_callback=None,
+    ):
+        if not file_transfer_list:
+            return
+
+        total_count = len(file_transfer_list)
+        success_count, successful_items = self._execute_transfer_plan(
+            file_transfer_list,
+            share_url,
+            context["uk"],
+            context["share_id"],
+            context["bdstoken"],
+            target_dir,
+            progress_callback,
+        )
+        stats["transfer_success_count"] += success_count
+        stats["completed_count"] += success_count
+        stats["transferred_files"].extend(item[3] for item in successful_items)
+        stats["failed_count"] += total_count - success_count
+        file_transfer_list.clear()
+
     def _transfer_dir_tree_divide_collect(
         self,
         shared_dir,
@@ -1193,53 +1221,83 @@ class BaiduStorage:
                 progress_callback("error", f"创建目录失败: {target_dir}")
             return
 
+        shared_dir_path = getattr(shared_dir, "path", shared_dir)
+        if progress_callback:
+            progress_callback("info", f"目录分治扫描: {shared_dir_path}")
+
+        child_count = 0
+        file_transfer_list = []
         try:
-            children = self.share_service.list_shared_dir_children(
-                shared_dir,
-                context["uk"],
-                context["share_id"],
-                context["bdstoken"],
+            child_iter = iter(
+                self.share_service.iter_shared_dir_children(
+                    shared_dir,
+                    context["uk"],
+                    context["share_id"],
+                    context["bdstoken"],
+                )
             )
         except Exception as exc:
             stats["failed_count"] += 1
             handle_error_and_notify(
                 exc,
-                f"目录分治列目录失败: {getattr(shared_dir, 'path', shared_dir)}",
+                f"目录分治列目录失败: {shared_dir_path}",
                 self.wechat_notifier,
                 None,
                 collect=True,
             )
             return
 
-        if progress_callback:
-            progress_callback(
-                "info",
-                f"目录分治扫描: {getattr(shared_dir, 'path', shared_dir)}，发现 {len(children)} 个子项",
-            )
+        while True:
+            try:
+                child = next(child_iter)
+            except StopIteration:
+                break
+            except Exception as exc:
+                self._flush_dir_tree_file_batch(
+                    file_transfer_list,
+                    target_dir,
+                    context,
+                    share_url,
+                    stats,
+                    progress_callback,
+                )
+                stats["failed_count"] += 1
+                handle_error_and_notify(
+                    exc,
+                    f"目录分治列目录失败: {shared_dir_path}",
+                    self.wechat_notifier,
+                    None,
+                    collect=True,
+                )
+                return
 
-        file_transfer_list = [
-            (child["fs_id"], target_dir, child["name"], child["name"], False)
-            for child in children
-            if child.get("is_file") and child.get("fs_id")
-        ]
-        if file_transfer_list:
-            success_count, successful_items = self._execute_transfer_plan(
-                file_transfer_list,
-                share_url,
-                context["uk"],
-                context["share_id"],
-                context["bdstoken"],
-                target_dir,
-                progress_callback,
-            )
-            stats["transfer_success_count"] += success_count
-            stats["completed_count"] += success_count
-            stats["transferred_files"].extend(item[3] for item in successful_items)
-            stats["failed_count"] += len(file_transfer_list) - success_count
+            child_count += 1
+            if child.get("is_file") and child.get("fs_id"):
+                file_transfer_list.append(
+                    (child["fs_id"], target_dir, child["name"], child["name"], False)
+                )
+                if len(file_transfer_list) >= TRANSFER_BATCH_SIZE:
+                    self._flush_dir_tree_file_batch(
+                        file_transfer_list,
+                        target_dir,
+                        context,
+                        share_url,
+                        stats,
+                        progress_callback,
+                    )
+                continue
 
-        for child in children:
             if not child.get("is_dir") or not child.get("fs_id"):
                 continue
+
+            self._flush_dir_tree_file_batch(
+                file_transfer_list,
+                target_dir,
+                context,
+                share_url,
+                stats,
+                progress_callback,
+            )
 
             folder_name = child.get("name") or os.path.basename(str(child.get("path", "")).rstrip("/"))
             if should_exclude_folder(folder_name, exclude_folder_filter):
@@ -1299,6 +1357,17 @@ class BaiduStorage:
                         None,
                         collect=True,
                     )
+
+        self._flush_dir_tree_file_batch(
+            file_transfer_list,
+            target_dir,
+            context,
+            share_url,
+            stats,
+            progress_callback,
+        )
+        if progress_callback:
+            progress_callback("info", f"目录分治扫描完成: {shared_dir_path}，处理 {child_count} 个子项")
 
     def _transfer_dir_tree_divide(
         self,
