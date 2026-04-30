@@ -4,8 +4,14 @@
 import functools
 import os
 import random
+import sys
 import time
+from pathlib import Path
 from threading import Lock
+
+_VENDOR_BAIDUPCS_PATH = Path(__file__).resolve().parent / "vendor" / "BaiduPCS-Py"
+if _VENDOR_BAIDUPCS_PATH.exists():
+    sys.path.insert(0, str(_VENDOR_BAIDUPCS_PATH))
 
 from baidupcs_py.baidupcs import BaiduPCSApi
 

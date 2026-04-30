@@ -62,10 +62,12 @@ graph LR
 
 ### 运行依赖安装
 
-主程序 `transfer_runner.py` 的运行依赖在 `requirements.txt` 中：
+主程序 `transfer_runner.py` 依赖 `vendor/BaiduPCS-Py` 子模块，请先初始化子模块再安装依赖：
 
 ```bash
+git submodule update --init --recursive
 pip install -r requirements.txt
+./scripts/build_baidupcs_submodule.sh
 ```
 
 ### 运行测试
@@ -300,8 +302,10 @@ https://pan.baidu.com/s/1example3?pwd=abcd /我的文件/资料
 ### 本地运行
 
 ```bash
-# 安装主程序依赖
+# 初始化 BaiduPCS-Py 子模块并安装依赖
+git submodule update --init --recursive
 pip install -r requirements.txt
+./scripts/build_baidupcs_submodule.sh
 
 # 如需使用本地配置文件，准备 config.json
 # 或者设置环境变量后直接运行
@@ -309,8 +313,8 @@ export BAIDU_COOKIES="BDUSS=xxx; STOKEN=xxx"
 export SHARE_URLS="https://pan.baidu.com/s/xxxxxxxx?pwd=abcd /保存目录"
 export WECHAT_WEBHOOK="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxxxxxxx"
 
-# 执行主任务
-python transfer_runner.py
+# 执行主任务（推荐，会自动构建子模块扩展并设置 PYTHONPATH）
+./scripts/run_transfer_task.sh
 ```
 
 ## 🔗 分享链接格式说明

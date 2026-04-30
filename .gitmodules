@@ -1,0 +1,3 @@
+[submodule "vendor/BaiduPCS-Py"]
+	path = vendor/BaiduPCS-Py
+	url = https://github.com/Jack-261108/BaiduPCS-Py

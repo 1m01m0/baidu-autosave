@@ -11,6 +11,8 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
+      with:
+        submodules: true
 
     - name: Set up Python
       uses: actions/setup-python@v4
@@ -23,6 +25,11 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
+
+    - name: Build BaiduPCS-Py submodule
+      run: |
+        ./scripts/build_baidupcs_submodule.sh
+        PYTHONPATH="$PWD/vendor/BaiduPCS-Py" python -c "from baidupcs_py.baidupcs import BaiduPCSApi; print(BaiduPCSApi)"
 
     - name: Run tests
       run: |
