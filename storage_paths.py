@@ -91,6 +91,85 @@ class StoragePathService:
             )
             return False
 
+    @staticmethod
+    def _normalize_relative_dir(relative_dir):
+        relative_dir = str(relative_dir or "").replace("\\", "/").strip("/")
+        return "" if relative_dir == "." else relative_dir
+
+    def list_local_files_in_dirs(self, dir_path, relative_dirs, use_cache=False):
+        normalized_dir_path = self.normalize_path(dir_path)
+        normalized_relative_dirs = {
+            self._normalize_relative_dir(relative_dir) for relative_dir in (relative_dirs or {""})
+        }
+        cache_key = (normalized_dir_path, tuple(sorted(normalized_relative_dirs)))
+        if use_cache and cache_key in self._local_files_cache:
+            return [dict(item) for item in self._local_files_cache[cache_key]]
+
+        try:
+            if not self.client:
+                handle_error_and_notify(
+                    ValueError("客户端未初始化或初始化失败"),
+                    "获取本地文件列表失败: 客户端不可用",
+                    self.wechat_notifier,
+                    None,
+                    collect=False,
+                )
+                return []
+
+            files = []
+            base = normalized_dir_path.replace("\\", "/")
+            if not base.endswith("/"):
+                base += "/"
+
+            for relative_dir in sorted(normalized_relative_dirs):
+                scan_path = normalized_dir_path.rstrip("/") or "/"
+                if relative_dir:
+                    scan_path = f"{scan_path.rstrip('/')}/{relative_dir}"
+
+                try:
+                    content = self.client.list(scan_path)
+                except Exception as exc:
+                    error_info = classify_storage_error(exc)
+                    if error_info.kind == "missing_path" or error_info.code == "31023":
+                        continue
+                    handle_error_and_notify(
+                        exc,
+                        f"列出目录内容时发生错误\n目录路径: {scan_path}",
+                        self.wechat_notifier,
+                        None,
+                        collect=False,
+                    )
+                    raise
+
+                for item in content:
+                    if not item.is_file:
+                        continue
+                    item_path = getattr(item, "path", "").replace("\\", "/")
+                    if item_path.startswith(base):
+                        relative_path = item_path[len(base) :]
+                    else:
+                        relative_path = item_path.lstrip("/")
+                    files.append(
+                        {
+                            "relative_path": relative_path,
+                            "file_name": os.path.basename(item_path),
+                            "md5": getattr(item, "md5", None),
+                        }
+                    )
+
+            if use_cache:
+                self._local_files_cache[cache_key] = [dict(item) for item in files]
+            return files
+        except Exception as exc:
+            handle_error_and_notify(
+                exc,
+                f"获取本地文件列表时发生异常\n目录路径: {dir_path}",
+                self.wechat_notifier,
+                None,
+                collect=False,
+            )
+            return []
+
     def list_local_files(self, dir_path, use_cache=False):
         normalized_dir_path = self.normalize_path(dir_path)
         if use_cache and normalized_dir_path in self._local_files_cache:

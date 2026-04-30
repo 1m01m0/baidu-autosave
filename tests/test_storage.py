@@ -2,7 +2,7 @@ import sys
 import types
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 if "baidupcs_py" not in sys.modules:
     baidupcs_module = types.ModuleType("baidupcs_py")
@@ -16,7 +16,7 @@ if "baidupcs_py" not in sys.modules:
     sys.modules["baidupcs_py"] = baidupcs_module
     sys.modules["baidupcs_py.baidupcs"] = baidupcs_submodule
 
-from storage import BaiduStorage
+from storage import BaiduStorage, FREQUENCY_LIMIT_DELAY, RENAME_DELAY
 from storage_client import BaiduClientAdapter
 from storage_errors import classify_storage_error, parse_share_error
 from storage_paths import StoragePathService
@@ -203,7 +203,7 @@ class SharedPathServiceTests(unittest.TestCase):
             files,
         )
 
-    def test_list_shared_files_reports_directory_progress(self):
+    def test_list_shared_files_reports_throttled_progress(self):
         root_dir = SimpleNamespace(
             path="/single-share",
             is_dir=True,
@@ -226,12 +226,72 @@ class SharedPathServiceTests(unittest.TestCase):
         self.assertEqual(1, len(files))
         messages = [call.args[1] for call in progress_callback.call_args_list]
         self.assertTrue(any("开始获取共享文件列表，共 1 个入口" in msg for msg in messages))
-        self.assertTrue(any("正在获取共享目录第 1 页: /single-share" in msg for msg in messages))
-        self.assertTrue(any("共享目录获取完成: /single-share" in msg for msg in messages))
-        self.assertTrue(any("共享文件列表获取完成：扫描 1 个目录，发现 1 个文件" in msg for msg in messages))
+        self.assertTrue(any("开始扫描共享入口 1/1: /single-share" in msg for msg in messages))
+        self.assertTrue(any("共享文件列表获取完成：扫描 1 个目录 / 1 页，发现 1 个文件" in msg for msg in messages))
+        self.assertFalse(any("正在获取共享目录第" in msg for msg in messages))
 
 
 class StoragePathServiceTests(unittest.TestCase):
+    def test_list_local_files_in_dirs_only_scans_candidate_dirs(self):
+        client = Mock()
+        client.list.side_effect = [
+            [
+                SimpleNamespace(
+                    is_file=True,
+                    is_dir=False,
+                    path="/save/A/a.txt",
+                    md5="md5-a",
+                )
+            ],
+            [
+                SimpleNamespace(
+                    is_file=True,
+                    is_dir=False,
+                    path="/save/B/C/c.txt",
+                    md5="md5-c",
+                )
+            ],
+        ]
+        service = StoragePathService(client)
+
+        result = service.list_local_files_in_dirs("/save", {"A", "B/C"}, use_cache=True)
+
+        self.assertEqual(
+            [
+                {"relative_path": "A/a.txt", "file_name": "a.txt", "md5": "md5-a"},
+                {"relative_path": "B/C/c.txt", "file_name": "c.txt", "md5": "md5-c"},
+            ],
+            result,
+        )
+        self.assertEqual([call("/save/A"), call("/save/B/C")], client.list.call_args_list)
+
+    def test_list_local_files_in_dirs_handles_root_target_dir(self):
+        client = Mock()
+        client.list.return_value = [
+            SimpleNamespace(is_file=True, is_dir=False, path="/a.txt", md5="root-md5")
+        ]
+        service = StoragePathService(client)
+
+        result = service.list_local_files_in_dirs("/", {""})
+
+        self.assertEqual(
+            [{"relative_path": "a.txt", "file_name": "a.txt", "md5": "root-md5"}],
+            result,
+        )
+        client.list.assert_called_once_with("/")
+
+    def test_list_local_files_in_dirs_treats_missing_dir_as_empty(self):
+        client = Mock()
+        client.list.side_effect = RuntimeError("error_code: 31066, message: 文件不存在")
+        service = StoragePathService(client)
+
+        with patch("storage_paths.handle_error_and_notify") as notify:
+            result = service.list_local_files_in_dirs("/save", {"missing"})
+
+        self.assertEqual([], result)
+        client.list.assert_called_once_with("/save/missing")
+        notify.assert_not_called()
+
     def test_list_local_files_treats_root_31023_as_empty_dir(self):
         client = Mock()
         client.list.side_effect = RuntimeError("error_code: 31023, message: 输入参数错误")
@@ -487,8 +547,51 @@ class BaiduStorageFlowTests(unittest.TestCase):
 
         self.assertEqual([], result)
         progress_callback.assert_any_call(
-            "info", "重命名目标已存在且内容相同（MD5 相同），跳过: new/a.txt"
+            "info",
+            "候选分析完成：共享文件 1 个，候选 1 个，正则过滤 0 个，本地已存在 1 个，"
+            "冲突跳过 0 个，需要转存 0 个，其中需重命名 0 个",
         )
+
+    def test_clear_local_files_cache_removes_full_and_targeted_entries(self):
+        self.storage.path_service.normalize_path.side_effect = lambda path: path
+        self.storage._local_files_cache = {
+            "/save": ["full"],
+            ("/save", ("a",)): ["targeted"],
+            "/other": ["other"],
+        }
+
+        self.storage._clear_local_files_cache("/save")
+
+        self.assertEqual({"/other": ["other"]}, self.storage._local_files_cache)
+
+    def test_execute_transfer_plan_sleeps_only_between_groups(self):
+        self.storage.path_service.normalize_path.side_effect = lambda path: path
+        transfer_list = [
+            (1, "/save/a", "a/1.txt", "a/1.txt", False),
+            (2, "/save/b", "b/2.txt", "b/2.txt", False),
+        ]
+
+        with patch("storage.time.sleep") as sleep:
+            success_count, successful_items = self.storage._execute_transfer_plan(
+                transfer_list, "url", 1, 2, "token", "/save"
+            )
+
+        self.assertEqual(2, success_count)
+        self.assertEqual(transfer_list, successful_items)
+        sleep.assert_called_once_with(FREQUENCY_LIMIT_DELAY)
+
+    def test_rename_transferred_files_sleeps_only_between_renames(self):
+        self.storage.path_service.ensure_dir_exists.return_value = True
+        transfer_items = [
+            (1, "/save", "a.txt", "renamed-a.txt", True),
+            (2, "/save", "b.txt", "renamed-b.txt", True),
+        ]
+
+        with patch("storage.time.sleep") as sleep:
+            result = self.storage._rename_transferred_files(transfer_items, "/save")
+
+        self.assertEqual(["renamed-a.txt", "renamed-b.txt"], result["transferred_files"])
+        sleep.assert_called_once_with(RENAME_DELAY)
 
     def test_rename_transferred_files_reports_failures_as_partial(self):
         self.storage.client.rename.side_effect = RuntimeError("rename boom")

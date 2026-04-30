@@ -492,18 +492,98 @@ class BaiduStorage:
             "bdstoken": bdstoken,
         }
 
-    def _scan_local_files_dict(self, save_dir, progress_callback=None):
+    @staticmethod
+    def _candidate_parent_dirs(*paths):
+        relative_dirs = set()
+        for path in paths:
+            normalized_path = str(path or "").replace("\\", "/").lstrip("/")
+            parent_dir = posixpath.dirname(normalized_path)
+            relative_dirs.add("" if parent_dir in ("", ".") else parent_dir)
+        return relative_dirs
+
+    def _prepare_transfer_candidates(
+        self,
+        shared_files_info,
+        shared_paths,
+        target_dir,
+        regex_pattern=None,
+        regex_replace=None,
+    ):
+        is_single_folder = len(shared_paths) == 1 and shared_paths[0].is_dir
+        candidates = []
+        relative_dirs = set()
+        summary = Counter(
+            {
+                "shared_count": len(shared_files_info),
+                "regex_filtered_count": 0,
+                "candidate_count": 0,
+                "rename_candidate_count": 0,
+            }
+        )
+
+        for file_info in shared_files_info:
+            clean_path = file_info["path"]
+            if is_single_folder and "/" in clean_path:
+                clean_path = "/".join(clean_path.split("/")[1:])
+
+            should_transfer, final_path = apply_regex_rules(
+                clean_path, regex_pattern, regex_replace
+            )
+            if not should_transfer:
+                summary["regex_filtered_count"] += 1
+                continue
+
+            clean_normalized = self.path_service.normalize_path(clean_path.lstrip("/"))
+            final_normalized = self.path_service.normalize_path(final_path.lstrip("/"))
+            need_rename = final_path != clean_path
+            if need_rename:
+                summary["rename_candidate_count"] += 1
+
+            dir_path = None
+            if target_dir is not None and clean_path is not None:
+                target_path = posixpath.join(target_dir, clean_path.lstrip("/"))
+                dir_path = posixpath.dirname(target_path).replace("\\", "/")
+                relative_dirs.update(self._candidate_parent_dirs(clean_path, final_path))
+
+            candidates.append(
+                {
+                    "fs_id": file_info["fs_id"],
+                    "clean_path": clean_path,
+                    "final_path": final_path,
+                    "clean_normalized": clean_normalized,
+                    "final_normalized": final_normalized,
+                    "need_rename": need_rename,
+                    "src_md5": file_info.get("md5") if isinstance(file_info, dict) else None,
+                    "dir_path": dir_path,
+                }
+            )
+            summary["candidate_count"] += 1
+
+        return candidates, summary, relative_dirs
+
+    def _scan_local_files_dict(self, save_dir, progress_callback=None, relative_dirs=None):
         if progress_callback:
             progress_callback("info", f"【步骤2/4】扫描本地目录: {save_dir}")
 
         local_files = []
         if save_dir:
-            local_files = self.path_service.list_local_files(save_dir, use_cache=True)
-            if progress_callback:
-                progress_callback(
-                    "info",
-                    f"本地目录中有 {len(local_files)} 个文件（按相对路径统计）",
+            if relative_dirs is None:
+                local_files = self.path_service.list_local_files(save_dir, use_cache=True)
+            else:
+                local_files = self.path_service.list_local_files_in_dirs(
+                    save_dir, relative_dirs, use_cache=True
                 )
+            if progress_callback:
+                if relative_dirs is None:
+                    progress_callback(
+                        "info",
+                        f"本地目录中有 {len(local_files)} 个文件（按相对路径统计）",
+                    )
+                else:
+                    progress_callback(
+                        "info",
+                        f"已扫描 {len(relative_dirs)} 个候选本地目录，发现 {len(local_files)} 个文件",
+                    )
 
         file_names = [
             self.path_service.normalize_path(file_info["file_name"], file_only=True)
@@ -526,6 +606,100 @@ class BaiduStorage:
             if file_info.get("relative_path")
         }
 
+    @staticmethod
+    def _add_warning_sample(warning_samples, message, max_samples=5):
+        if len(warning_samples) < max_samples:
+            warning_samples.append(message)
+
+    def _filter_transfer_candidates(
+        self,
+        candidates,
+        local_files_dict,
+        summary,
+        progress_callback=None,
+    ):
+        if progress_callback:
+            progress_callback("info", "【步骤3/4】准备转存: 对比文件和准备目录")
+
+        transfer_list = []
+        warning_samples = []
+
+        for candidate in candidates:
+            clean_path = candidate["clean_path"]
+            final_path = candidate["final_path"]
+            need_rename = candidate["need_rename"]
+            src_md5 = candidate["src_md5"]
+            source_md5 = local_files_dict.get(candidate["clean_normalized"])
+            target_md5 = local_files_dict.get(candidate["final_normalized"])
+            source_exists = candidate["clean_normalized"] in local_files_dict
+            target_exists = candidate["final_normalized"] in local_files_dict
+
+            if not need_rename:
+                if source_exists:
+                    summary["existing_count"] += 1
+                    if src_md5:
+                        if source_md5 == src_md5 or source_md5 is None:
+                            continue
+                        summary["conflict_count"] += 1
+                        self._add_warning_sample(
+                            warning_samples,
+                            f"同路径已存在,但内容不同(md5不同),跳过： {final_path}",
+                        )
+                        continue
+                    continue
+            elif target_exists:
+                summary["existing_count"] += 1
+                if src_md5 and target_md5 == src_md5:
+                    continue
+                if src_md5 and target_md5 is None:
+                    continue
+                summary["conflict_count"] += 1
+                self._add_warning_sample(
+                    warning_samples,
+                    f"重命名目标已存在，跳过转存: {final_path}",
+                )
+                continue
+            elif source_exists:
+                summary["existing_count"] += 1
+                if src_md5 and source_md5 == src_md5:
+                    continue
+                summary["conflict_count"] += 1
+                self._add_warning_sample(
+                    warning_samples,
+                    f"源路径已存在，跳过重复转存以避免副本: {clean_path} -> {final_path}",
+                )
+                continue
+
+            if candidate["dir_path"] is None or clean_path is None:
+                continue
+
+            transfer_list.append(
+                (
+                    candidate["fs_id"],
+                    candidate["dir_path"],
+                    clean_path,
+                    final_path,
+                    need_rename,
+                )
+            )
+            summary["transfer_needed_count"] += 1
+            if need_rename:
+                summary["rename_needed_count"] += 1
+
+        if progress_callback:
+            progress_callback(
+                "info",
+                "候选分析完成："
+                f"共享文件 {summary['shared_count']} 个，候选 {summary['candidate_count']} 个，"
+                f"正则过滤 {summary['regex_filtered_count']} 个，本地已存在 {summary['existing_count']} 个，"
+                f"冲突跳过 {summary['conflict_count']} 个，需要转存 {summary['transfer_needed_count']} 个，"
+                f"其中需重命名 {summary['rename_needed_count']} 个",
+            )
+            for message in warning_samples:
+                progress_callback("warning", message)
+
+        return transfer_list
+
     def _build_transfer_list(
         self,
         shared_files_info,
@@ -536,107 +710,27 @@ class BaiduStorage:
         regex_replace=None,
         progress_callback=None,
     ):
-        if progress_callback:
-            progress_callback("info", "【步骤3/4】准备转存: 对比文件和准备目录")
+        candidates, summary, _ = self._prepare_transfer_candidates(
+            shared_files_info,
+            shared_paths,
+            target_dir,
+            regex_pattern,
+            regex_replace,
+        )
+        return self._filter_transfer_candidates(
+            candidates, local_files_dict, summary, progress_callback
+        )
 
-        is_single_folder = len(shared_paths) == 1 and shared_paths[0].is_dir
-        transfer_list = []
-
-        for file_info in shared_files_info:
-            clean_path = file_info["path"]
-            if is_single_folder and "/" in clean_path:
-                clean_path = "/".join(clean_path.split("/")[1:])
-
-            should_transfer, final_path = apply_regex_rules(
-                clean_path, regex_pattern, regex_replace
-            )
-            if not should_transfer:
-                if progress_callback:
-                    progress_callback("info", f"文件被正则过滤掉: {clean_path}")
-                continue
-
-            clean_normalized = self.path_service.normalize_path(clean_path.lstrip("/"))
-            final_normalized = self.path_service.normalize_path(final_path.lstrip("/"))
-            need_rename = final_path != clean_path
-
-            src_md5 = file_info.get("md5") if isinstance(file_info, dict) else None
-            source_md5 = local_files_dict.get(clean_normalized)
-            target_md5 = local_files_dict.get(final_normalized)
-            source_exists = clean_normalized in local_files_dict
-            target_exists = final_normalized in local_files_dict
-
-            if not need_rename:
-                if source_exists:
-                    if src_md5:
-                        if source_md5 == src_md5:
-                            if progress_callback:
-                                progress_callback(
-                                    "info", f"文件已存在且内容相同（MD5 相同），跳过: {final_path}"
-                                )
-                            continue
-                        if source_md5 is None:
-                            if progress_callback:
-                                progress_callback(
-                                    "info", f"文件已存在，无法获取目标文件 MD5，跳过: {final_path}"
-                                )
-                            continue
-                        if progress_callback:
-                            progress_callback(
-                                "warning", f"同路径已存在,但内容不同(md5不同),跳过： {final_path}"
-                            )
-                        continue
-                    if progress_callback:
-                        progress_callback("info", f"文件已存在（无MD5校验），跳过: {final_path}")
-                    continue
-            elif target_exists:
-                if src_md5 and target_md5 == src_md5:
-                    if progress_callback:
-                        progress_callback(
-                            "info", f"重命名目标已存在且内容相同（MD5 相同），跳过: {final_path}"
-                        )
-                    continue
-                if src_md5 and target_md5 is None:
-                    if progress_callback:
-                        progress_callback(
-                            "info", f"重命名目标已存在，无法获取目标文件 MD5，跳过: {final_path}"
-                        )
-                    continue
-                if progress_callback:
-                    progress_callback(
-                        "warning", f"重命名目标已存在，跳过转存: {final_path}"
-                    )
-                continue
-            elif source_exists:
-                if src_md5 and source_md5 == src_md5:
-                    if progress_callback:
-                        progress_callback(
-                            "info", f"源路径已存在且内容相同，跳过重复转存: {clean_path} -> {final_path}"
-                        )
-                    continue
-                if progress_callback:
-                    progress_callback(
-                        "warning", f"源路径已存在，跳过重复转存以避免副本: {clean_path} -> {final_path}"
-                    )
-                continue
-
-            if target_dir is None or clean_path is None:
-                continue
-
-            target_path = posixpath.join(target_dir, clean_path)
-            dir_path = posixpath.dirname(target_path).replace("\\", "/")
-            transfer_list.append(
-                (file_info["fs_id"], dir_path, clean_path, final_path, need_rename)
-            )
-
-            if progress_callback:
-                if need_rename:
-                    progress_callback("info", f"需要转存文件: {clean_path} -> {final_path}")
-                else:
-                    progress_callback("info", f"需要转存文件: {final_path}")
-
-        if progress_callback and transfer_list:
-            progress_callback("info", f"找到 {len(transfer_list)} 个新文件需要转存")
-        return transfer_list
+    def _clear_local_files_cache(self, target_dir):
+        normalized_target_dir = self.path_service.normalize_path(target_dir)
+        cache_keys = [
+            key
+            for key in self._local_files_cache
+            if key == normalized_target_dir
+            or (isinstance(key, tuple) and key and key[0] == normalized_target_dir)
+        ]
+        for key in cache_keys:
+            self._local_files_cache.pop(key, None)
 
     def _ensure_transfer_dirs(self, transfer_list):
         created_dirs = set()
@@ -706,7 +800,8 @@ class BaiduStorage:
 
         success_count = 0
         successful_transfer_items = []
-        for dir_path, fs_ids in grouped_transfers.items():
+        grouped_transfer_entries = list(grouped_transfers.items())
+        for index, (dir_path, fs_ids) in enumerate(grouped_transfer_entries):
             try:
                 normalized_dir_path = self._transfer_group(
                     dir_path,
@@ -720,7 +815,7 @@ class BaiduStorage:
                 success_count += len(fs_ids)
                 successful_transfer_items.extend(grouped_transfer_items.get(dir_path, []))
                 if target_dir:
-                    self._local_files_cache.pop(self.path_service.normalize_path(target_dir), None)
+                    self._clear_local_files_cache(target_dir)
                 if progress_callback:
                     progress_callback("success", f"成功转存到 {normalized_dir_path}")
             except Exception as e:
@@ -743,7 +838,7 @@ class BaiduStorage:
                         success_count += len(fs_ids)
                         successful_transfer_items.extend(grouped_transfer_items.get(dir_path, []))
                         if target_dir:
-                            self._local_files_cache.pop(self.path_service.normalize_path(target_dir), None)
+                            self._clear_local_files_cache(target_dir)
                         if progress_callback:
                             progress_callback("success", f"重试成功: {normalized_dir_path}")
                     except Exception as retry_e:
@@ -770,7 +865,8 @@ class BaiduStorage:
                         None,
                         collect=True,
                     )
-            time.sleep(FREQUENCY_LIMIT_DELAY)
+            if index < len(grouped_transfer_entries) - 1:
+                time.sleep(FREQUENCY_LIMIT_DELAY)
 
         return success_count, successful_transfer_items
 
@@ -778,6 +874,8 @@ class BaiduStorage:
         renamed_files = []
         rename_failed_files = []
         completed_count = 0
+        rename_total = sum(1 for item in successful_transfer_items if item[4])
+        rename_attempt = 0
         for _, dir_path, clean_path, final_path, need_rename in successful_transfer_items:
             if not need_rename:
                 renamed_files.append(final_path)
@@ -795,10 +893,12 @@ class BaiduStorage:
                 if progress_callback:
                     progress_callback("info", f"重命名文件: {clean_path} -> {final_path}")
 
+                rename_attempt += 1
                 self.client.rename(original_full_path, final_full_path)
                 renamed_files.append(final_path)
                 completed_count += 1
-                time.sleep(RENAME_DELAY)
+                if rename_attempt < rename_total:
+                    time.sleep(RENAME_DELAY)
             except Exception as e:
                 error_info = classify_storage_error(e)
                 error_msg = (
@@ -927,14 +1027,22 @@ class BaiduStorage:
                 if not context:
                     return {"success": False, "error": "获取分享文件列表失败"}
 
-                local_files_dict = self._scan_local_files_dict(save_dir, progress_callback)
-                transfer_list = self._build_transfer_list(
+                candidates, transfer_summary, relative_dirs = self._prepare_transfer_candidates(
                     context["shared_files_info"],
                     context["shared_paths"],
                     save_dir,
-                    local_files_dict,
                     regex_pattern,
                     regex_replace,
+                )
+                local_files_dict = {}
+                if candidates:
+                    local_files_dict = self._scan_local_files_dict(
+                        save_dir, progress_callback, relative_dirs
+                    )
+                transfer_list = self._filter_transfer_candidates(
+                    candidates,
+                    local_files_dict,
+                    transfer_summary,
                     progress_callback,
                 )
 
