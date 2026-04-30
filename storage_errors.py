@@ -103,7 +103,7 @@ def classify_storage_error(error: ErrorLike) -> StorageErrorInfo:
             code=code,
         )
 
-    if "file already exists" in lowered:
+    if code == "31061" or "file already exists" in lowered or "文件已经存在" in raw_message:
         return StorageErrorInfo(
             kind="already_exists",
             message="文件或目录已存在",

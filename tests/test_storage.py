@@ -69,13 +69,16 @@ class BaiduStoragePureMethodTests(unittest.TestCase):
         self.assertTrue(should_include_folder("Anime", [r"Movies", r"Anime"]))
         self.assertTrue(should_include_folder("Anything", "["))
 
-    def test_classify_storage_error_supports_rate_limit_and_missing_path(self):
+    def test_classify_storage_error_supports_rate_limit_missing_path_and_exists(self):
         rate_limit = classify_storage_error("error_code: -65")
         self.assertEqual("rate_limit", rate_limit.kind)
         self.assertTrue(rate_limit.retryable)
 
         missing_path = classify_storage_error("error_code: 31066, message: 文件不存在")
         self.assertEqual("missing_path", missing_path.kind)
+
+        already_exists = classify_storage_error("error_code: 31061, message: 文件已经存在")
+        self.assertEqual("already_exists", already_exists.kind)
 
     def test_format_error_info_masks_share_urls_and_pwd(self):
         error = ValueError(
@@ -290,6 +293,19 @@ class StoragePathServiceTests(unittest.TestCase):
 
         self.assertEqual([], result)
         client.list.assert_called_once_with("/save/missing")
+        notify.assert_not_called()
+
+    def test_ensure_dir_exists_ignores_existing_directory_error(self):
+        client = Mock()
+        client.makedir.side_effect = RuntimeError("error_code: 31061, message: 文件已经存在")
+        service = StoragePathService(client)
+
+        with patch("storage_paths.handle_error_and_notify") as notify:
+            result = service.ensure_dir_exists("/save/a")
+
+        self.assertTrue(result)
+        self.assertEqual([call("/save"), call("/save/a")], client.makedir.call_args_list)
+        client.list.assert_not_called()
         notify.assert_not_called()
 
     def test_list_local_files_treats_root_31023_as_empty_dir(self):
