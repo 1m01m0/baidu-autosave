@@ -19,7 +19,7 @@ from storage_errors import (
     parse_share_error,
 )
 from storage_paths import StoragePathService
-from storage_rules import apply_regex_rules
+from storage_rules import apply_regex_rules, should_exclude_folder
 from storage_shares import SharedPathService
 
 try:
@@ -220,6 +220,7 @@ class BaiduStorage:
         regex_pattern = config.get("regex_pattern")
         regex_replace = config.get("regex_replace")
         folder_filter = config.get("folder_filter")
+        exclude_folder_filter = config.get("exclude_folder_filter")
 
         self._notify_batch_progress(
             "info", index, total_count, f"处理分享链接: {masked_share_url}", progress_callback
@@ -233,6 +234,7 @@ class BaiduStorage:
             regex_pattern=regex_pattern,
             regex_replace=regex_replace,
             folder_filter=folder_filter,
+            exclude_folder_filter=exclude_folder_filter,
         )
         result_record = self._build_result_record(index, share_url, save_dir, result)
 
@@ -510,11 +512,20 @@ class BaiduStorage:
             "bdstoken": shared_paths[0].bdstoken,
         }
 
-    def _load_share_files(self, context, folder_filter, progress_callback=None):
+    def _load_share_files(
+        self,
+        context,
+        folder_filter,
+        progress_callback=None,
+        exclude_folder_filter=None,
+    ):
         if progress_callback:
             progress_callback("info", "开始获取共享文件列表")
         shared_files_info = self.share_service.list_shared_files(
-            context["shared_paths"], folder_filter, progress_callback
+            context["shared_paths"],
+            folder_filter,
+            progress_callback,
+            exclude_folder_filter=exclude_folder_filter,
         )
 
         if progress_callback:
@@ -524,11 +535,23 @@ class BaiduStorage:
         context["shared_files_info"] = shared_files_info
         return context
 
-    def _load_share_context(self, share_url, pwd, folder_filter, progress_callback=None):
+    def _load_share_context(
+        self,
+        share_url,
+        pwd,
+        folder_filter,
+        progress_callback=None,
+        exclude_folder_filter=None,
+    ):
         context = self._load_share_entries(share_url, pwd, progress_callback)
         if not context:
             return None
-        return self._load_share_files(context, folder_filter, progress_callback)
+        return self._load_share_files(
+            context,
+            folder_filter,
+            progress_callback,
+            exclude_folder_filter=exclude_folder_filter,
+        )
 
     @staticmethod
     def _candidate_parent_dirs(*paths):
@@ -1061,8 +1084,257 @@ class BaiduStorage:
         folder_name = os.path.basename(str(getattr(shared_path, "path", "")).rstrip("/"))
         return posixpath.join(save_dir, folder_name) if folder_name else save_dir
 
+    @staticmethod
+    def _new_dir_tree_divide_stats():
+        return {
+            "completed_count": 0,
+            "transfer_success_count": 0,
+            "skipped_dir_count": 0,
+            "failed_count": 0,
+            "transferred_files": [],
+        }
+
+    @staticmethod
+    def _build_dir_tree_divide_result(stats, progress_callback=None):
+        completed_count = stats["completed_count"]
+        transfer_success_count = stats["transfer_success_count"]
+        skipped_dir_count = stats["skipped_dir_count"]
+        failed_count = stats["failed_count"]
+        transferred_files = stats["transferred_files"]
+
+        if transfer_success_count and failed_count:
+            message = (
+                f"目录分治转存部分成功，成功 {completed_count} 项，"
+                f"失败 {failed_count} 项，跳过 {skipped_dir_count} 个目录"
+            )
+            if progress_callback:
+                progress_callback("warning", message)
+            return {
+                "success": False,
+                "partial": True,
+                "divide_path": True,
+                "message": message,
+                "error": message,
+                "transferred_files": transferred_files,
+                "completed_count": completed_count,
+                "transfer_success_count": transfer_success_count,
+                "skipped_dir_count": skipped_dir_count,
+                "failed_count": failed_count,
+                "rename_failed_count": 0,
+            }
+
+        if transfer_success_count:
+            message = (
+                f"目录分治转存完成，成功 {completed_count} 项，"
+                f"跳过 {skipped_dir_count} 个目录"
+            )
+            if progress_callback:
+                progress_callback("success", message)
+            return {
+                "success": True,
+                "partial": False,
+                "divide_path": True,
+                "message": message,
+                "transferred_files": transferred_files,
+                "completed_count": completed_count,
+                "transfer_success_count": transfer_success_count,
+                "skipped_dir_count": skipped_dir_count,
+                "failed_count": failed_count,
+                "rename_failed_count": 0,
+            }
+
+        if failed_count:
+            error = f"目录分治转存失败，失败 {failed_count} 项，跳过 {skipped_dir_count} 个目录"
+            if progress_callback:
+                progress_callback("error", error)
+            return {
+                "success": False,
+                "partial": False,
+                "divide_path": True,
+                "error": error,
+                "completed_count": completed_count,
+                "transfer_success_count": transfer_success_count,
+                "skipped_dir_count": skipped_dir_count,
+                "failed_count": failed_count,
+                "rename_failed_count": 0,
+            }
+
+        message = "目录分治转存没有可转存内容"
+        if skipped_dir_count:
+            message = f"{message}，跳过 {skipped_dir_count} 个目录"
+        if progress_callback:
+            progress_callback("info", message)
+        return {
+            "success": True,
+            "partial": False,
+            "divide_path": True,
+            "skipped": True,
+            "message": message,
+            "completed_count": completed_count,
+            "transfer_success_count": transfer_success_count,
+            "skipped_dir_count": skipped_dir_count,
+            "failed_count": failed_count,
+            "rename_failed_count": 0,
+        }
+
+    def _transfer_dir_tree_divide_collect(
+        self,
+        shared_dir,
+        target_dir,
+        context,
+        share_url,
+        exclude_folder_filter,
+        stats,
+        progress_callback=None,
+    ):
+        if not self.path_service.ensure_dir_exists(target_dir):
+            stats["failed_count"] += 1
+            if progress_callback:
+                progress_callback("error", f"创建目录失败: {target_dir}")
+            return
+
+        try:
+            children = self.share_service.list_shared_dir_children(
+                shared_dir,
+                context["uk"],
+                context["share_id"],
+                context["bdstoken"],
+            )
+        except Exception as exc:
+            stats["failed_count"] += 1
+            handle_error_and_notify(
+                exc,
+                f"目录分治列目录失败: {getattr(shared_dir, 'path', shared_dir)}",
+                self.wechat_notifier,
+                None,
+                collect=True,
+            )
+            return
+
+        if progress_callback:
+            progress_callback(
+                "info",
+                f"目录分治扫描: {getattr(shared_dir, 'path', shared_dir)}，发现 {len(children)} 个子项",
+            )
+
+        file_transfer_list = [
+            (child["fs_id"], target_dir, child["name"], child["name"], False)
+            for child in children
+            if child.get("is_file") and child.get("fs_id")
+        ]
+        if file_transfer_list:
+            success_count, successful_items = self._execute_transfer_plan(
+                file_transfer_list,
+                share_url,
+                context["uk"],
+                context["share_id"],
+                context["bdstoken"],
+                target_dir,
+                progress_callback,
+            )
+            stats["transfer_success_count"] += success_count
+            stats["completed_count"] += success_count
+            stats["transferred_files"].extend(item[3] for item in successful_items)
+            stats["failed_count"] += len(file_transfer_list) - success_count
+
+        for child in children:
+            if not child.get("is_dir") or not child.get("fs_id"):
+                continue
+
+            folder_name = child.get("name") or os.path.basename(str(child.get("path", "")).rstrip("/"))
+            if should_exclude_folder(folder_name, exclude_folder_filter):
+                stats["skipped_dir_count"] += 1
+                if progress_callback:
+                    progress_callback("info", f"跳过排除目录: {folder_name}")
+                continue
+            if exclude_folder_filter:
+                self._transfer_dir_tree_divide_collect(
+                    child["raw"],
+                    posixpath.join(target_dir, folder_name),
+                    context,
+                    share_url,
+                    exclude_folder_filter,
+                    stats,
+                    progress_callback,
+                )
+                continue
+
+            try:
+                self._transfer_group(
+                    target_dir,
+                    [child["fs_id"]],
+                    share_url,
+                    context["uk"],
+                    context["share_id"],
+                    context["bdstoken"],
+                    progress_callback,
+                )
+                stats["transfer_success_count"] += 1
+                stats["completed_count"] += 1
+                stats["transferred_files"].append(folder_name)
+            except Exception as exc:
+                if is_transfer_count_limit_error(exc):
+                    if progress_callback:
+                        progress_callback("warning", f"子目录超量，继续拆分: {folder_name}")
+                    self._transfer_dir_tree_divide_collect(
+                        child["raw"],
+                        posixpath.join(target_dir, folder_name),
+                        context,
+                        share_url,
+                        exclude_folder_filter,
+                        stats,
+                        progress_callback,
+                    )
+                else:
+                    stats["failed_count"] += 1
+                    error_info = classify_storage_error(exc)
+                    if progress_callback:
+                        progress_callback(
+                            "error", f"转存子目录失败: {folder_name} - {error_info.message}"
+                        )
+                    handle_error_and_notify(
+                        exc,
+                        f"转存子目录失败: {folder_name}",
+                        self.wechat_notifier,
+                        None,
+                        collect=True,
+                    )
+
+    def _transfer_dir_tree_divide(
+        self,
+        shared_dir,
+        target_dir,
+        context,
+        share_url,
+        exclude_folder_filter,
+        progress_callback=None,
+    ):
+        stats = self._new_dir_tree_divide_stats()
+        folder_name = os.path.basename(str(getattr(shared_dir, "path", shared_dir)).rstrip("/"))
+        if should_exclude_folder(folder_name, exclude_folder_filter):
+            stats["skipped_dir_count"] = 1
+            if progress_callback:
+                progress_callback("info", f"跳过排除目录: {folder_name}")
+            return self._build_dir_tree_divide_result(stats, progress_callback)
+
+        self._transfer_dir_tree_divide_collect(
+            shared_dir,
+            target_dir,
+            context,
+            share_url,
+            exclude_folder_filter,
+            stats,
+            progress_callback,
+        )
+        return self._build_dir_tree_divide_result(stats, progress_callback)
+
     def _try_transfer_dir_fast_path(
-        self, context, share_url, save_dir, progress_callback=None
+        self,
+        context,
+        share_url,
+        save_dir,
+        exclude_folder_filter=None,
+        progress_callback=None,
     ):
         shared_path = context["shared_paths"][0]
         folder_name = os.path.basename(str(getattr(shared_path, "path", "")).rstrip("/"))
@@ -1082,6 +1354,19 @@ class BaiduStorage:
                 progress_callback("info", "目标目录已存在，回退逐文件对比转存")
             return None
 
+        divide_target_dir = self._dir_fast_path_target_dir(context, save_dir)
+        if exclude_folder_filter:
+            if progress_callback:
+                progress_callback("info", "检测到排除目录规则，改用目录分治转存")
+            return self._transfer_dir_tree_divide(
+                shared_path,
+                divide_target_dir,
+                context,
+                share_url,
+                exclude_folder_filter,
+                progress_callback,
+            )
+
         try:
             self._transfer_group(
                 save_dir,
@@ -1097,9 +1382,16 @@ class BaiduStorage:
                 if progress_callback:
                     progress_callback(
                         "warning",
-                        "整目录直接转存被百度拒绝，回退逐文件分批转存",
+                        "整目录直接转存超量，改用目录分治转存",
                     )
-                return None
+                return self._transfer_dir_tree_divide(
+                    shared_path,
+                    divide_target_dir,
+                    context,
+                    share_url,
+                    exclude_folder_filter,
+                    progress_callback,
+                )
             raise
 
         message = f"整目录直接转存成功: {folder_name or shared_path.path}"
@@ -1125,6 +1417,7 @@ class BaiduStorage:
         regex_pattern=None,
         regex_replace=None,
         folder_filter=None,
+        exclude_folder_filter=None,
     ):
         """转存分享文件"""
         masked_share_url = mask_share_url(share_url) or share_url
@@ -1154,13 +1447,22 @@ class BaiduStorage:
                     context, save_dir, regex_pattern, regex_replace, folder_filter
                 ):
                     fast_path_result = self._try_transfer_dir_fast_path(
-                        context, share_url, save_dir, progress_callback
+                        context,
+                        share_url,
+                        save_dir,
+                        exclude_folder_filter,
+                        progress_callback,
                     )
                     if fast_path_result is not None:
                         return fast_path_result
                     transfer_target_dir = self._dir_fast_path_target_dir(context, save_dir)
 
-                context = self._load_share_files(context, folder_filter, progress_callback)
+                context = self._load_share_files(
+                    context,
+                    folder_filter,
+                    progress_callback,
+                    exclude_folder_filter=exclude_folder_filter,
+                )
                 candidates, transfer_summary, relative_dirs = self._prepare_transfer_candidates(
                     context["shared_files_info"],
                     context["shared_paths"],

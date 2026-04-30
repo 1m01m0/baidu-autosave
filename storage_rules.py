@@ -25,25 +25,37 @@ def apply_regex_rules(file_path, regex_pattern=None, regex_replace=None):
         return True, file_path
 
 
+def _matches_folder_filter(folder_name, folder_filter):
+    if isinstance(folder_filter, list):
+        return any(re.search(pattern, folder_name) for pattern in folder_filter)
+    if isinstance(folder_filter, str):
+        return bool(re.search(folder_filter, folder_name))
+    return None
+
+
 def should_include_folder(folder_name, folder_filter=None):
     if not folder_filter:
         return True
 
     try:
-        if isinstance(folder_filter, list):
-            for pattern in folder_filter:
-                if re.search(pattern, folder_name):
-                    return True
-            return False
-
-        if isinstance(folder_filter, str):
-            return bool(re.search(folder_filter, folder_name))
-
-        return True
+        matched = _matches_folder_filter(folder_name, folder_filter)
+        return True if matched is None else matched
     except re.error:
         return True
     except Exception:
         return True
+
+
+def should_exclude_folder(folder_name, exclude_folder_filter=None):
+    if not exclude_folder_filter:
+        return False
+
+    try:
+        return bool(_matches_folder_filter(folder_name, exclude_folder_filter))
+    except re.error:
+        return False
+    except Exception:
+        return False
 
 
 def extract_file_info(file_dict):

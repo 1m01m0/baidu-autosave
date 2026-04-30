@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from config_utils import (
+    apply_global_share_defaults,
     load_runtime_config,
     normalize_share_urls_value,
     parse_share_links_from_text,
@@ -68,6 +69,28 @@ class NormalizeShareUrlsValueTests(unittest.TestCase):
         self.assertEqual("/Shows", result["share_configs"][1]["save_dir"])
 
 
+class ApplyGlobalShareDefaultsTests(unittest.TestCase):
+    def test_apply_global_share_defaults_propagates_exclude_filter_and_preserves_override(self):
+        share_configs = [
+            {"share_url": "https://pan.baidu.com/s/abc12345"},
+            {
+                "share_url": "https://pan.baidu.com/s/xyz_789",
+                "exclude_folder_filter": r"^dist$",
+            },
+        ]
+
+        result = apply_global_share_defaults(
+            share_configs,
+            {
+                "save_dir": "/Auto",
+                "exclude_folder_filter": r"^node_modules$",
+            },
+        )
+
+        self.assertEqual(r"^node_modules$", result[0]["exclude_folder_filter"])
+        self.assertEqual(r"^dist$", result[1]["exclude_folder_filter"])
+
+
 class ValidateRuntimeConfigTests(unittest.TestCase):
     def test_validate_runtime_config_accepts_alias_fields(self):
         config = {
@@ -94,6 +117,28 @@ class ValidateRuntimeConfigTests(unittest.TestCase):
 
         self.assertTrue(any("STOKEN" in msg for msg in result["errors"]))
         self.assertTrue(any("正则表达式错误" in msg for msg in result["errors"]))
+
+    def test_validate_runtime_config_reports_bad_exclude_folder_filter(self):
+        config = {
+            "cookies": "BDUSS=foo; STOKEN=bar",
+            "share_urls": "https://pan.baidu.com/s/abc12345",
+            "exclude_folder_filter": "[",
+        }
+
+        result = validate_runtime_config(config)
+
+        self.assertTrue(any("排除文件夹规则错误" in msg for msg in result["errors"]))
+
+    def test_validate_runtime_config_reports_non_string_filter_item(self):
+        config = {
+            "cookies": "BDUSS=foo; STOKEN=bar",
+            "share_urls": "https://pan.baidu.com/s/abc12345",
+            "exclude_folder_filter": [r"^dist$", 123],
+        }
+
+        result = validate_runtime_config(config)
+
+        self.assertTrue(any("排除文件夹规则类型错误" in msg for msg in result["errors"]))
 
 
 class LoadRuntimeConfigTests(unittest.TestCase):

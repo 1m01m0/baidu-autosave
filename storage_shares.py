@@ -3,7 +3,7 @@
 
 import os
 
-from storage_rules import extract_file_info, should_include_folder
+from storage_rules import extract_file_info, should_exclude_folder, should_include_folder
 from utils import handle_error_and_notify
 
 
@@ -126,6 +126,60 @@ class SharedPathService:
             file_info["path"] = cls._trim_shared_root(shared_file_path, shared_root)
         return file_info
 
+    @staticmethod
+    def _normalize_shared_child(shared_file):
+        if isinstance(shared_file, dict):
+            path = shared_file.get("path") or shared_file.get("server_filename", "")
+            is_dir = shared_file.get("is_dir") or shared_file.get("isdir") == 1
+            is_file = shared_file.get("is_file") or shared_file.get("isdir") == 0
+            fs_id = shared_file.get("fs_id", "")
+        else:
+            path = getattr(shared_file, "path", "")
+            is_dir = getattr(shared_file, "is_dir", False)
+            is_file = getattr(shared_file, "is_file", not is_dir)
+            fs_id = getattr(shared_file, "fs_id", "")
+
+        name = os.path.basename(str(path).rstrip("/"))
+        return {
+            "raw": shared_file,
+            "fs_id": fs_id,
+            "path": path,
+            "name": name,
+            "is_dir": bool(is_dir),
+            "is_file": bool(is_file),
+        }
+
+    def _iter_shared_dir_pages(self, dir_path, uk, share_id, bdstoken):
+        page = 1
+        page_size = self.SHARED_DIR_PAGE_SIZE
+
+        while True:
+            sub_paths = self.client.list_shared_paths(
+                dir_path, uk, share_id, bdstoken, page=page, size=page_size
+            )
+            if isinstance(sub_paths, list):
+                sub_files = sub_paths
+            elif isinstance(sub_paths, dict):
+                sub_files = sub_paths.get("list", [])
+            else:
+                break
+
+            yield page, sub_files
+            if len(sub_files) < page_size:
+                break
+            page += 1
+
+    def list_shared_dir_children(self, path, uk, share_id, bdstoken):
+        dir_path = getattr(path, "path", path)
+        children = []
+        for _, sub_files in self._iter_shared_dir_pages(
+            dir_path, uk, share_id, bdstoken
+        ):
+            children.extend(
+                self._normalize_shared_child(sub_file) for sub_file in sub_files
+            )
+        return children
+
     def list_shared_dir_files(
         self,
         path,
@@ -136,6 +190,7 @@ class SharedPathService:
         shared_root="",
         progress_callback=None,
         stats=None,
+        exclude_folder_filter=None,
     ):
         files = []
         if stats is None:
@@ -152,28 +207,17 @@ class SharedPathService:
                 )
                 return files
 
-            page = 1
-            page_size = self.SHARED_DIR_PAGE_SIZE
             dir_path = getattr(path, "path", path)
             stats["dirs"] += 1
             if self._should_report_progress(stats):
                 self._report_scan_progress(progress_callback, stats)
 
-            while True:
+            for page, sub_files in self._iter_shared_dir_pages(
+                dir_path, uk, share_id, bdstoken
+            ):
                 stats["pages"] += 1
                 if self._should_report_progress(stats):
                     self._report_scan_progress(progress_callback, stats)
-
-                sub_paths = self.client.list_shared_paths(
-                    path.path, uk, share_id, bdstoken, page=page, size=page_size
-                )
-
-                if isinstance(sub_paths, list):
-                    sub_files = sub_paths
-                elif isinstance(sub_paths, dict):
-                    sub_files = sub_paths.get("list", [])
-                else:
-                    break
 
                 if not sub_files:
                     if page == 1 and progress_callback:
@@ -183,8 +227,12 @@ class SharedPathService:
                 for sub_file in sub_files:
                     is_dir = getattr(sub_file, "is_dir", False)
                     if is_dir:
-                        folder_name = os.path.basename(getattr(sub_file, "path", ""))
-                        if should_include_folder(folder_name, folder_filter):
+                        folder_name = os.path.basename(
+                            getattr(sub_file, "path", "").rstrip("/")
+                        )
+                        if should_exclude_folder(folder_name, exclude_folder_filter):
+                            stats["skipped_dirs"] += 1
+                        elif should_include_folder(folder_name, folder_filter):
                             files.extend(
                                 self.list_shared_dir_files(
                                     sub_file,
@@ -195,6 +243,7 @@ class SharedPathService:
                                     shared_root,
                                     progress_callback,
                                     stats,
+                                    exclude_folder_filter=exclude_folder_filter,
                                 )
                             )
                         else:
@@ -206,10 +255,6 @@ class SharedPathService:
                             stats["files"] += 1
                             if self._should_report_progress(stats):
                                 self._report_scan_progress(progress_callback, stats)
-
-                if len(sub_files) < page_size:
-                    break
-                page += 1
 
         except Exception as exc:
             handle_error_and_notify(
@@ -223,7 +268,13 @@ class SharedPathService:
 
         return files
 
-    def list_shared_files(self, shared_paths, folder_filter=None, progress_callback=None):
+    def list_shared_files(
+        self,
+        shared_paths,
+        folder_filter=None,
+        progress_callback=None,
+        exclude_folder_filter=None,
+    ):
         if not shared_paths:
             return []
 
@@ -239,8 +290,10 @@ class SharedPathService:
 
         for index, path in enumerate(shared_paths, 1):
             if path.is_dir:
-                folder_name = os.path.basename(path.path)
-                if should_include_folder(folder_name, folder_filter):
+                folder_name = os.path.basename(path.path.rstrip("/"))
+                if should_exclude_folder(folder_name, exclude_folder_filter):
+                    stats["skipped_dirs"] += 1
+                elif should_include_folder(folder_name, folder_filter):
                     if progress_callback:
                         progress_callback(
                             "info",
@@ -256,6 +309,7 @@ class SharedPathService:
                             shared_root,
                             progress_callback,
                             stats,
+                            exclude_folder_filter=exclude_folder_filter,
                         )
                     )
                 else:

@@ -41,6 +41,7 @@ def normalize_config_aliases(data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "WECHAT_WEBHOOK"
     )
     normalized["folder_filter"] = raw.get("folder_filter")
+    normalized["exclude_folder_filter"] = raw.get("exclude_folder_filter")
     normalized["regex_pattern"] = raw.get("regex_pattern")
     normalized["regex_replace"] = raw.get("regex_replace")
     return normalized
@@ -225,6 +226,8 @@ def apply_global_share_defaults(
             share_config["save_dir"] = config.get("save_dir") or DEFAULT_SAVE_DIR
         if config.get("folder_filter") and "folder_filter" not in share_config:
             share_config["folder_filter"] = config["folder_filter"]
+        if config.get("exclude_folder_filter") and "exclude_folder_filter" not in share_config:
+            share_config["exclude_folder_filter"] = config["exclude_folder_filter"]
         if config.get("regex_pattern") and "regex_pattern" not in share_config:
             share_config["regex_pattern"] = config["regex_pattern"]
         if config.get("regex_replace") is not None and "regex_replace" not in share_config:
@@ -271,6 +274,48 @@ def load_runtime_config(config_path: Union[Path, str] = "config.json") -> Dict[s
     config["share_count"] = len(config["share_configs"])
     config["config_path"] = str(path)
     return config
+
+
+def _validate_regex_filter_config(
+    value: Any,
+    field_name: str,
+    label: str,
+    info_messages: List[str],
+    errors: List[str],
+) -> None:
+    if not value:
+        info_messages.append(f"ℹ️  未设置{label} (可选)")
+        return
+
+    if isinstance(value, str):
+        try:
+            re.compile(value)
+        except re.error as exc:
+            errors.append(f"❌ {label}错误: {exc}")
+        else:
+            info_messages.append(f"✅ {label}有效: {value}")
+        return
+
+    if isinstance(value, list):
+        for idx, pattern in enumerate(value, 1):
+            if not isinstance(pattern, str):
+                errors.append(
+                    f"❌ 第 {idx} 个{label}类型错误，应为字符串，"
+                    f"当前类型: {type(pattern).__name__}"
+                )
+                return
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                errors.append(f"❌ 第 {idx} 个{label}错误: {exc}")
+                return
+        info_messages.append(f"✅ {label}有效 (共 {len(value)} 个)")
+        return
+
+    errors.append(
+        f"❌ {field_name} 类型错误，应为字符串或列表，"
+        f"当前类型: {type(value).__name__}"
+    )
 
 
 def validate_runtime_config(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -381,29 +426,20 @@ def validate_runtime_config(config: Dict[str, Any]) -> Dict[str, Any]:
         except re.error as exc:
             errors.append(f"❌ 正则表达式错误: {exc}")
 
-    folder_filter = normalized.get("folder_filter")
-    if not folder_filter:
-        info_messages.append("ℹ️  未设置文件夹过滤规则 (可选)")
-    elif isinstance(folder_filter, str):
-        try:
-            re.compile(folder_filter)
-            info_messages.append(f"✅ 文件夹过滤规则有效: {folder_filter}")
-        except re.error as exc:
-            errors.append(f"❌ 文件夹过滤规则错误: {exc}")
-    elif isinstance(folder_filter, list):
-        try:
-            for idx, pattern in enumerate(folder_filter, 1):
-                re.compile(pattern)
-        except re.error as exc:
-            errors.append(f"❌ 第 {idx} 个文件夹过滤规则错误: {exc}")
-        else:
-            info_messages.append(
-                f"✅ 文件夹过滤规则有效 (共 {len(folder_filter)} 个)"
-            )
-    else:
-        errors.append(
-            f"❌ folder_filter 类型错误，应为字符串或列表，当前类型: {type(folder_filter).__name__}"
-        )
+    _validate_regex_filter_config(
+        normalized.get("folder_filter"),
+        "folder_filter",
+        "文件夹过滤规则",
+        info_messages,
+        errors,
+    )
+    _validate_regex_filter_config(
+        normalized.get("exclude_folder_filter"),
+        "exclude_folder_filter",
+        "排除文件夹规则",
+        info_messages,
+        errors,
+    )
 
     normalized.update(share_data)
     normalized["share_configs"] = apply_global_share_defaults(

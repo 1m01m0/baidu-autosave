@@ -29,7 +29,7 @@ from storage import (
 from storage_client import BaiduClientAdapter
 from storage_errors import classify_storage_error, is_transfer_count_limit_error, parse_share_error
 from storage_paths import StoragePathService
-from storage_rules import apply_regex_rules, should_include_folder
+from storage_rules import apply_regex_rules, should_exclude_folder, should_include_folder
 from storage_shares import SharedPathService
 from utils import format_error_info
 from wechat_notifier import WeChatNotifier
@@ -77,6 +77,14 @@ class BaiduStoragePureMethodTests(unittest.TestCase):
         self.assertFalse(should_include_folder("Shows-2026", r"Movies"))
         self.assertTrue(should_include_folder("Anime", [r"Movies", r"Anime"]))
         self.assertTrue(should_include_folder("Anything", "["))
+
+    def test_should_exclude_folder_supports_string_list_and_invalid_regex(self):
+        self.assertFalse(should_exclude_folder("Movies"))
+        self.assertTrue(should_exclude_folder("node_modules", r"^node_modules$"))
+        self.assertFalse(should_exclude_folder("src", r"^node_modules$"))
+        self.assertTrue(should_exclude_folder("__pycache__", [r"^node_modules$", r"^__pycache__$"]))
+        self.assertFalse(should_exclude_folder("Anything", "["))
+        self.assertFalse(should_exclude_folder("Anything", 123))
 
     def test_classify_storage_error_supports_rate_limit_missing_path_and_exists(self):
         rate_limit = classify_storage_error("error_code: -65")
@@ -269,6 +277,102 @@ class SharedPathServiceTests(unittest.TestCase):
         self.assertTrue(any("开始扫描共享入口 1/1: /single-share" in msg for msg in messages))
         self.assertTrue(any("共享文件列表获取完成：扫描 1 个目录 / 1 页，发现 1 个文件" in msg for msg in messages))
         self.assertFalse(any("正在获取共享目录第" in msg for msg in messages))
+
+    def test_list_shared_files_keeps_progress_callback_positional_compatibility(self):
+        root_dir = SimpleNamespace(
+            path="/single-share",
+            is_dir=True,
+            uk=1,
+            share_id=2,
+            bdstoken="token",
+        )
+        nested_file = SimpleNamespace(
+            path="/single-share/单集.mp4",
+            is_dir=False,
+            fs_id=11,
+            size=456,
+            md5="def",
+        )
+        progress_callback = Mock()
+        self.service.client.list_shared_paths.return_value = [nested_file]
+
+        files = self.service.list_shared_files([root_dir], None, progress_callback)
+
+        self.assertEqual(1, len(files))
+        progress_callback.assert_any_call("info", "开始获取共享文件列表，共 1 个入口")
+
+    def test_list_shared_files_skips_excluded_node_modules(self):
+        root_dir = SimpleNamespace(
+            path="/single-share",
+            is_dir=True,
+            uk=1,
+            share_id=2,
+            bdstoken="token",
+        )
+        node_modules = SimpleNamespace(
+            path="/single-share/node_modules",
+            is_dir=True,
+            fs_id=10,
+        )
+        app_file = SimpleNamespace(
+            path="/single-share/app.py",
+            is_dir=False,
+            fs_id=11,
+            size=456,
+            md5="def",
+        )
+        self.service.client.list_shared_paths.return_value = [node_modules, app_file]
+
+        files = self.service.list_shared_files(
+            [root_dir], exclude_folder_filter=r"^node_modules$"
+        )
+
+        self.assertEqual(1, len(files))
+        self.assertEqual("app.py", files[0]["path"])
+        self.service.client.list_shared_paths.assert_called_once_with(
+            "/single-share", 1, 2, "token", page=1, size=100
+        )
+
+    def test_list_shared_dir_children_returns_direct_child_metadata(self):
+        child_dir = SimpleNamespace(
+            path="/single-share/src",
+            is_dir=True,
+            is_file=False,
+            fs_id=10,
+        )
+        child_file = SimpleNamespace(
+            path="/single-share/app.py",
+            is_dir=False,
+            is_file=True,
+            fs_id=11,
+        )
+        self.service.client.list_shared_paths.return_value = [child_dir, child_file]
+
+        children = self.service.list_shared_dir_children(
+            "/single-share", 1, 2, "token"
+        )
+
+        self.assertEqual(
+            [
+                {
+                    "raw": child_dir,
+                    "fs_id": 10,
+                    "path": "/single-share/src",
+                    "name": "src",
+                    "is_dir": True,
+                    "is_file": False,
+                },
+                {
+                    "raw": child_file,
+                    "fs_id": 11,
+                    "path": "/single-share/app.py",
+                    "name": "app.py",
+                    "is_dir": False,
+                    "is_file": True,
+                },
+            ],
+            children,
+        )
 
 
 class StoragePathServiceTests(unittest.TestCase):
@@ -621,8 +725,16 @@ class BaiduStorageFlowTests(unittest.TestCase):
             shared_url="url",
         )
 
-    def test_transfer_share_falls_back_when_dir_fast_path_hits_count_limit(self):
+    def test_transfer_share_divides_tree_when_root_dir_hits_count_limit(self):
         shared_dir = SimpleNamespace(is_dir=True, fs_id=10, path="/share/course")
+        child_file = {
+            "raw": SimpleNamespace(path="/share/course/a.txt", is_dir=False, is_file=True, fs_id=11),
+            "fs_id": 11,
+            "path": "/share/course/a.txt",
+            "name": "a.txt",
+            "is_dir": False,
+            "is_file": True,
+        }
         entry_context = {
             "shared_paths": [shared_dir],
             "uk": 1,
@@ -631,35 +743,345 @@ class BaiduStorageFlowTests(unittest.TestCase):
         }
         self.storage._normalize_save_dir = Mock(return_value="/save")
         self.storage._load_share_entries = Mock(return_value=entry_context)
-        self.storage._load_share_files = Mock(
-            return_value={**entry_context, "shared_files_info": [{"fs_id": 11, "path": "a.txt"}]}
-        )
+        self.storage._load_share_files = Mock()
+        self.storage.share_service.list_shared_dir_children.return_value = [child_file]
         self.storage.path_service.ensure_dir_exists.return_value = True
         self.storage.client.list.return_value = []
-        self.storage.client.transfer_shared_paths.side_effect = RuntimeError(
-            "error_code: -33, message: 一次支持操作999个"
-        )
-        self.storage._scan_local_files_dict = Mock(return_value={})
-        transfer_list = [(11, "/save/course", "a.txt", "a.txt", False)]
-        self.storage._ensure_transfer_dirs = Mock(return_value=None)
-        self.storage._execute_transfer_plan = Mock(return_value=(1, transfer_list))
-        rename_result = {
-            "transferred_files": ["a.txt"],
-            "rename_failed_files": [],
-            "rename_failed_count": 0,
-            "completed_count": 1,
-        }
-        self.storage._rename_transferred_files = Mock(return_value=rename_result)
-        self.storage._build_transfer_result = Mock(return_value={"success": True})
+        self.storage.client.transfer_shared_paths.side_effect = [
+            RuntimeError("error_code: -33, message: 一次支持操作999个"),
+            None,
+        ]
 
         result = self.storage.transfer_share("url", save_dir="/save")
 
         self.assertTrue(result["success"])
-        self.storage._load_share_files.assert_called_once()
-        self.storage._scan_local_files_dict.assert_called_once_with("/save/course", None, {""})
-        self.storage._execute_transfer_plan.assert_called_once_with(
-            transfer_list, "url", 1, 2, "token", "/save/course", None
+        self.assertTrue(result["divide_path"])
+        self.assertEqual(1, result["completed_count"])
+        self.storage._load_share_files.assert_not_called()
+        self.storage.share_service.list_shared_dir_children.assert_called_once_with(
+            shared_dir, 1, 2, "token"
         )
+        self.assertEqual(2, self.storage.client.transfer_shared_paths.call_count)
+        self.storage.client.transfer_shared_paths.assert_has_calls(
+            [
+                call(
+                    remotedir="/save",
+                    fs_ids=[10],
+                    uk=1,
+                    share_id=2,
+                    bdstoken="token",
+                    shared_url="url",
+                ),
+                call(
+                    remotedir="/save/course",
+                    fs_ids=[11],
+                    uk=1,
+                    share_id=2,
+                    bdstoken="token",
+                    shared_url="url",
+                ),
+            ]
+        )
+
+    def test_transfer_share_uses_subdir_fast_path_during_tree_divide(self):
+        shared_dir = SimpleNamespace(is_dir=True, fs_id=10, path="/share/course")
+        child_dir = {
+            "raw": SimpleNamespace(path="/share/course/src", is_dir=True, is_file=False, fs_id=20),
+            "fs_id": 20,
+            "path": "/share/course/src",
+            "name": "src",
+            "is_dir": True,
+            "is_file": False,
+        }
+        entry_context = {
+            "shared_paths": [shared_dir],
+            "uk": 1,
+            "share_id": 2,
+            "bdstoken": "token",
+        }
+        self.storage._normalize_save_dir = Mock(return_value="/save")
+        self.storage._load_share_entries = Mock(return_value=entry_context)
+        self.storage._load_share_files = Mock()
+        self.storage.share_service.list_shared_dir_children.return_value = [child_dir]
+        self.storage.path_service.ensure_dir_exists.return_value = True
+        self.storage.client.list.return_value = []
+        self.storage.client.transfer_shared_paths.side_effect = [
+            RuntimeError("error_code: -33, message: 一次支持操作999个"),
+            None,
+        ]
+
+        result = self.storage.transfer_share("url", save_dir="/save")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(1, self.storage.share_service.list_shared_dir_children.call_count)
+        self.storage.client.transfer_shared_paths.assert_has_calls(
+            [
+                call(
+                    remotedir="/save",
+                    fs_ids=[10],
+                    uk=1,
+                    share_id=2,
+                    bdstoken="token",
+                    shared_url="url",
+                ),
+                call(
+                    remotedir="/save/course",
+                    fs_ids=[20],
+                    uk=1,
+                    share_id=2,
+                    bdstoken="token",
+                    shared_url="url",
+                ),
+            ]
+        )
+
+    def test_transfer_share_recurses_when_subdir_fast_path_hits_count_limit(self):
+        shared_dir = SimpleNamespace(is_dir=True, fs_id=10, path="/share/course")
+        big_dir = SimpleNamespace(path="/share/course/big", is_dir=True, is_file=False, fs_id=20)
+        big_child = SimpleNamespace(path="/share/course/big/a.txt", is_dir=False, is_file=True, fs_id=21)
+        child_dir = {
+            "raw": big_dir,
+            "fs_id": 20,
+            "path": "/share/course/big",
+            "name": "big",
+            "is_dir": True,
+            "is_file": False,
+        }
+        child_file = {
+            "raw": big_child,
+            "fs_id": 21,
+            "path": "/share/course/big/a.txt",
+            "name": "a.txt",
+            "is_dir": False,
+            "is_file": True,
+        }
+        entry_context = {
+            "shared_paths": [shared_dir],
+            "uk": 1,
+            "share_id": 2,
+            "bdstoken": "token",
+        }
+        self.storage._normalize_save_dir = Mock(return_value="/save")
+        self.storage._load_share_entries = Mock(return_value=entry_context)
+        self.storage._load_share_files = Mock()
+        self.storage.share_service.list_shared_dir_children.side_effect = [
+            [child_dir],
+            [child_file],
+        ]
+        self.storage.path_service.ensure_dir_exists.return_value = True
+        self.storage.client.list.return_value = []
+        self.storage.client.transfer_shared_paths.side_effect = [
+            RuntimeError("error_code: -33, message: 一次支持操作999个"),
+            RuntimeError("error_code: -33, message: 一次支持操作999个"),
+            None,
+        ]
+
+        result = self.storage.transfer_share("url", save_dir="/save")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(2, self.storage.share_service.list_shared_dir_children.call_count)
+        self.storage.share_service.list_shared_dir_children.assert_has_calls(
+            [call(shared_dir, 1, 2, "token"), call(big_dir, 1, 2, "token")]
+        )
+        self.storage.client.transfer_shared_paths.assert_has_calls(
+            [
+                call(
+                    remotedir="/save",
+                    fs_ids=[10],
+                    uk=1,
+                    share_id=2,
+                    bdstoken="token",
+                    shared_url="url",
+                ),
+                call(
+                    remotedir="/save/course",
+                    fs_ids=[20],
+                    uk=1,
+                    share_id=2,
+                    bdstoken="token",
+                    shared_url="url",
+                ),
+                call(
+                    remotedir="/save/course/big",
+                    fs_ids=[21],
+                    uk=1,
+                    share_id=2,
+                    bdstoken="token",
+                    shared_url="url",
+                ),
+            ]
+        )
+
+    def test_transfer_share_uses_tree_divide_when_exclude_filter_is_set(self):
+        shared_dir = SimpleNamespace(is_dir=True, fs_id=10, path="/share/course")
+        excluded_dir = {
+            "raw": SimpleNamespace(path="/share/course/node_modules", is_dir=True, is_file=False, fs_id=20),
+            "fs_id": 20,
+            "path": "/share/course/node_modules",
+            "name": "node_modules",
+            "is_dir": True,
+            "is_file": False,
+        }
+        app_file = {
+            "raw": SimpleNamespace(path="/share/course/app.py", is_dir=False, is_file=True, fs_id=21),
+            "fs_id": 21,
+            "path": "/share/course/app.py",
+            "name": "app.py",
+            "is_dir": False,
+            "is_file": True,
+        }
+        entry_context = {
+            "shared_paths": [shared_dir],
+            "uk": 1,
+            "share_id": 2,
+            "bdstoken": "token",
+        }
+        self.storage._normalize_save_dir = Mock(return_value="/save")
+        self.storage._load_share_entries = Mock(return_value=entry_context)
+        self.storage._load_share_files = Mock()
+        self.storage.share_service.list_shared_dir_children.return_value = [excluded_dir, app_file]
+        self.storage.path_service.ensure_dir_exists.return_value = True
+        self.storage.client.list.return_value = []
+
+        result = self.storage.transfer_share(
+            "url", save_dir="/save", exclude_folder_filter=r"^node_modules$"
+        )
+
+        self.assertTrue(result["success"])
+        self.assertTrue(result["divide_path"])
+        self.assertEqual(1, result["skipped_dir_count"])
+        self.storage._load_share_files.assert_not_called()
+        self.storage.client.transfer_shared_paths.assert_called_once_with(
+            remotedir="/save/course",
+            fs_ids=[21],
+            uk=1,
+            share_id=2,
+            bdstoken="token",
+            shared_url="url",
+        )
+
+    def test_transfer_share_skips_root_directory_when_exclude_filter_matches(self):
+        shared_dir = SimpleNamespace(is_dir=True, fs_id=10, path="/share/node_modules")
+        entry_context = {
+            "shared_paths": [shared_dir],
+            "uk": 1,
+            "share_id": 2,
+            "bdstoken": "token",
+        }
+        self.storage._normalize_save_dir = Mock(return_value="/save")
+        self.storage._load_share_entries = Mock(return_value=entry_context)
+        self.storage._load_share_files = Mock()
+        self.storage.path_service.ensure_dir_exists.return_value = True
+        self.storage.client.list.return_value = []
+
+        result = self.storage.transfer_share(
+            "url", save_dir="/save", exclude_folder_filter=r"^node_modules$"
+        )
+
+        self.assertTrue(result["skipped"])
+        self.assertEqual(1, result["skipped_dir_count"])
+        self.storage.share_service.list_shared_dir_children.assert_not_called()
+        self.storage.client.transfer_shared_paths.assert_not_called()
+
+    def test_transfer_share_recurses_when_exclude_filter_may_match_nested_dir(self):
+        shared_dir = SimpleNamespace(is_dir=True, fs_id=10, path="/share/course")
+        src_dir = SimpleNamespace(path="/share/course/src", is_dir=True, is_file=False, fs_id=20)
+        node_modules = SimpleNamespace(
+            path="/share/course/src/node_modules", is_dir=True, is_file=False, fs_id=21
+        )
+        app_file = SimpleNamespace(
+            path="/share/course/src/app.py", is_dir=False, is_file=True, fs_id=22
+        )
+        src_child = {
+            "raw": src_dir,
+            "fs_id": 20,
+            "path": "/share/course/src",
+            "name": "src",
+            "is_dir": True,
+            "is_file": False,
+        }
+        excluded_child = {
+            "raw": node_modules,
+            "fs_id": 21,
+            "path": "/share/course/src/node_modules",
+            "name": "node_modules",
+            "is_dir": True,
+            "is_file": False,
+        }
+        app_child = {
+            "raw": app_file,
+            "fs_id": 22,
+            "path": "/share/course/src/app.py",
+            "name": "app.py",
+            "is_dir": False,
+            "is_file": True,
+        }
+        entry_context = {
+            "shared_paths": [shared_dir],
+            "uk": 1,
+            "share_id": 2,
+            "bdstoken": "token",
+        }
+        self.storage._normalize_save_dir = Mock(return_value="/save")
+        self.storage._load_share_entries = Mock(return_value=entry_context)
+        self.storage._load_share_files = Mock()
+        self.storage.share_service.list_shared_dir_children.side_effect = [
+            [src_child],
+            [excluded_child, app_child],
+        ]
+        self.storage.path_service.ensure_dir_exists.return_value = True
+        self.storage.client.list.return_value = []
+
+        result = self.storage.transfer_share(
+            "url", save_dir="/save", exclude_folder_filter=r"^node_modules$"
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(1, result["skipped_dir_count"])
+        self.storage.share_service.list_shared_dir_children.assert_has_calls(
+            [call(shared_dir, 1, 2, "token"), call(src_dir, 1, 2, "token")]
+        )
+        self.storage.client.transfer_shared_paths.assert_called_once_with(
+            remotedir="/save/course/src",
+            fs_ids=[22],
+            uk=1,
+            share_id=2,
+            bdstoken="token",
+            shared_url="url",
+        )
+
+    def test_transfer_dir_tree_divide_splits_files_by_batch_size(self):
+        shared_dir = SimpleNamespace(path="/share/course", is_dir=True, fs_id=10)
+        children = [
+            {
+                "raw": SimpleNamespace(path=f"/share/course/{fs_id}.txt", is_dir=False, is_file=True, fs_id=fs_id),
+                "fs_id": fs_id,
+                "path": f"/share/course/{fs_id}.txt",
+                "name": f"{fs_id}.txt",
+                "is_dir": False,
+                "is_file": True,
+            }
+            for fs_id in range(1, TRANSFER_BATCH_SIZE * 2 + 2)
+        ]
+        self.storage.path_service.ensure_dir_exists.return_value = True
+        self.storage.share_service.list_shared_dir_children.return_value = children
+
+        with patch("storage.time.sleep"):
+            result = self.storage._transfer_dir_tree_divide(
+                shared_dir,
+                "/save/course",
+                {"uk": 1, "share_id": 2, "bdstoken": "token"},
+                "url",
+                None,
+            )
+
+        calls = self.storage.client.transfer_shared_paths.call_args_list
+        self.assertTrue(result["success"])
+        self.assertEqual(len(children), result["completed_count"])
+        self.assertEqual(3, len(calls))
+        self.assertEqual(TRANSFER_BATCH_SIZE, len(calls[0].kwargs["fs_ids"]))
+        self.assertEqual(TRANSFER_BATCH_SIZE, len(calls[1].kwargs["fs_ids"]))
+        self.assertEqual(1, len(calls[2].kwargs["fs_ids"]))
 
     def test_transfer_share_does_not_fallback_for_unknown_fast_path_error(self):
         shared_dir = SimpleNamespace(is_dir=True, fs_id=10, path="/share/course")
@@ -740,6 +1162,25 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.storage.client.transfer_shared_paths.assert_not_called()
         self.storage._load_share_files.assert_called_once()
 
+    def test_transfer_share_skips_tree_divide_when_folder_filter_is_set(self):
+        shared_dir = SimpleNamespace(is_dir=True, fs_id=10, path="/share/course")
+        entry_context = {
+            "shared_paths": [shared_dir],
+            "uk": 1,
+            "share_id": 2,
+            "bdstoken": "token",
+        }
+        self.storage._normalize_save_dir = Mock(return_value="/save")
+        self.storage._load_share_entries = Mock(return_value=entry_context)
+        self.storage._load_share_files = Mock(return_value={**entry_context, "shared_files_info": []})
+
+        result = self.storage.transfer_share("url", save_dir="/save", folder_filter="course")
+
+        self.assertTrue(result["skipped"])
+        self.storage.client.transfer_shared_paths.assert_not_called()
+        self.storage.share_service.list_shared_dir_children.assert_not_called()
+        self.storage._load_share_files.assert_called_once()
+
     def test_process_single_share_config_handles_successful_result(self):
         self.storage.transfer_share = Mock(
             return_value={"success": True, "message": "成功", "transferred_files": ["f1"]}
@@ -757,6 +1198,30 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertEqual("成功", result["message"])
         progress_callback.assert_any_call("success", "【1/2】成功: 成功")
+
+    def test_process_single_share_config_passes_exclude_folder_filter(self):
+        self.storage.transfer_share = Mock(return_value={"success": True, "message": "成功"})
+
+        self.storage._process_single_share_config(
+            1,
+            1,
+            {
+                "share_url": "https://pan.baidu.com/s/abc",
+                "save_dir": "/save",
+                "exclude_folder_filter": r"^node_modules$",
+            },
+        )
+
+        self.storage.transfer_share.assert_called_once_with(
+            share_url="https://pan.baidu.com/s/abc",
+            pwd=None,
+            save_dir="/save",
+            progress_callback=None,
+            regex_pattern=None,
+            regex_replace=None,
+            folder_filter=None,
+            exclude_folder_filter=r"^node_modules$",
+        )
 
     def test_process_single_share_config_handles_skipped_result(self):
         self.storage.transfer_share = Mock(
