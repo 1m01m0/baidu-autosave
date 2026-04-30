@@ -199,6 +199,23 @@ def is_retry_abort_error(error: ErrorLike) -> bool:
     return classify_storage_error(error).kind == "retry_abort"
 
 
+def is_transfer_count_limit_error(error: ErrorLike) -> bool:
+    error_info = classify_storage_error(error)
+    raw_message = error_info.raw_message.lower()
+    limit_keywords = (
+        "转存文件数超限",
+        "一次支持操作999个",
+        "share transfer pcs error",
+        "more items",
+        "too many",
+    )
+    if error_info.code in {"-33", "120", "130"}:
+        return True
+    if error_info.code == "4":
+        return any(keyword in raw_message for keyword in limit_keywords)
+    return any(keyword in raw_message for keyword in limit_keywords)
+
+
 def is_missing_path_error(error: ErrorLike) -> bool:
     return classify_storage_error(error).kind == "missing_path"
 

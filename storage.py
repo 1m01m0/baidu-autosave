@@ -12,7 +12,12 @@ from wechat_notifier import WeChatNotifier
 from utils import handle_error_and_notify, ErrorCollector, mask_share_url
 from config_utils import parse_share_links_from_text
 from storage_client import BaiduClientAdapter
-from storage_errors import classify_storage_error, is_rate_limit_error, parse_share_error
+from storage_errors import (
+    classify_storage_error,
+    is_rate_limit_error,
+    is_transfer_count_limit_error,
+    parse_share_error,
+)
 from storage_paths import StoragePathService
 from storage_rules import apply_regex_rules
 from storage_shares import SharedPathService
@@ -38,6 +43,17 @@ def _read_non_negative_float_env(name, default):
     return value if value >= 0 else default
 
 
+def _read_positive_int_env(name, default):
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        return default
+    return value if value >= 1 else default
+
+
 # 常量定义
 RATE_LIMIT_WAIT_TIME = 10
 FREQUENCY_LIMIT_DELAY = _read_non_negative_float_env(
@@ -45,6 +61,7 @@ FREQUENCY_LIMIT_DELAY = _read_non_negative_float_env(
 )
 RENAME_DELAY = _read_non_negative_float_env("TRANSFERSHARE_RENAME_DELAY", 0.5)
 BATCH_SHARE_DELAY = _read_non_negative_float_env("TRANSFERSHARE_BATCH_SHARE_DELAY", 2)
+TRANSFER_BATCH_SIZE = _read_positive_int_env("TRANSFERSHARE_TRANSFER_BATCH_SIZE", 999)
 
 
 class BaiduStorage:
@@ -468,7 +485,7 @@ class BaiduStorage:
     def _normalize_save_dir(self, save_dir):
         return self.path_service.normalize_path(save_dir) if save_dir else save_dir
 
-    def _load_share_context(self, share_url, pwd, folder_filter, progress_callback=None):
+    def _load_share_entries(self, share_url, pwd, progress_callback=None):
         masked_share_url = mask_share_url(share_url) or share_url
         if progress_callback:
             progress_callback("info", f"【步骤1/4】访问分享链接: {masked_share_url}")
@@ -476,8 +493,6 @@ class BaiduStorage:
             progress_callback("info", "使用密码访问分享链接")
 
         shared_paths = self.share_service.load_shared_paths(share_url, pwd)
-        if progress_callback:
-            progress_callback("info", "开始获取共享文件列表")
         if not shared_paths:
             handle_error_and_notify(
                 ValueError("获取分享文件列表失败"),
@@ -488,23 +503,32 @@ class BaiduStorage:
             )
             return None
 
-        uk = shared_paths[0].uk
-        share_id = shared_paths[0].share_id
-        bdstoken = shared_paths[0].bdstoken
+        return {
+            "shared_paths": shared_paths,
+            "uk": shared_paths[0].uk,
+            "share_id": shared_paths[0].share_id,
+            "bdstoken": shared_paths[0].bdstoken,
+        }
+
+    def _load_share_files(self, context, folder_filter, progress_callback=None):
+        if progress_callback:
+            progress_callback("info", "开始获取共享文件列表")
         shared_files_info = self.share_service.list_shared_files(
-            shared_paths, folder_filter, progress_callback
+            context["shared_paths"], folder_filter, progress_callback
         )
 
         if progress_callback:
             progress_callback("info", f"获取到 {len(shared_files_info)} 个共享文件")
 
-        return {
-            "shared_paths": shared_paths,
-            "shared_files_info": shared_files_info,
-            "uk": uk,
-            "share_id": share_id,
-            "bdstoken": bdstoken,
-        }
+        context = dict(context)
+        context["shared_files_info"] = shared_files_info
+        return context
+
+    def _load_share_context(self, share_url, pwd, folder_filter, progress_callback=None):
+        context = self._load_share_entries(share_url, pwd, progress_callback)
+        if not context:
+            return None
+        return self._load_share_files(context, folder_filter, progress_callback)
 
     @staticmethod
     def _candidate_parent_dirs(*paths):
@@ -805,17 +829,21 @@ class BaiduStorage:
                 "info", f"【步骤4/4】开始执行转存操作，共 {len(transfer_list)} 个文件"
             )
 
-        grouped_transfers = {}
         grouped_transfer_items = {}
         for item in transfer_list:
-            fs_id, dir_path, _, _, _ = item
-            grouped_transfers.setdefault(dir_path, []).append(fs_id)
+            _, dir_path, _, _, _ = item
             grouped_transfer_items.setdefault(dir_path, []).append(item)
 
         success_count = 0
         successful_transfer_items = []
-        grouped_transfer_entries = list(grouped_transfers.items())
-        for index, (dir_path, fs_ids) in enumerate(grouped_transfer_entries):
+        grouped_transfer_entries = []
+        for dir_path, items in grouped_transfer_items.items():
+            for start in range(0, len(items), TRANSFER_BATCH_SIZE):
+                batch_items = items[start : start + TRANSFER_BATCH_SIZE]
+                batch_fs_ids = [item[0] for item in batch_items]
+                grouped_transfer_entries.append((dir_path, batch_fs_ids, batch_items))
+
+        for index, (dir_path, fs_ids, batch_items) in enumerate(grouped_transfer_entries):
             try:
                 normalized_dir_path = self._transfer_group(
                     dir_path,
@@ -826,8 +854,8 @@ class BaiduStorage:
                     bdstoken,
                     progress_callback,
                 )
-                success_count += len(fs_ids)
-                successful_transfer_items.extend(grouped_transfer_items.get(dir_path, []))
+                success_count += len(batch_items)
+                successful_transfer_items.extend(batch_items)
                 if target_dir:
                     self._clear_local_files_cache(target_dir)
                 if progress_callback:
@@ -849,8 +877,8 @@ class BaiduStorage:
                             bdstoken,
                             None,
                         )
-                        success_count += len(fs_ids)
-                        successful_transfer_items.extend(grouped_transfer_items.get(dir_path, []))
+                        success_count += len(batch_items)
+                        successful_transfer_items.extend(batch_items)
                         if target_dir:
                             self._clear_local_files_cache(target_dir)
                         if progress_callback:
@@ -1006,6 +1034,88 @@ class BaiduStorage:
             "transfer_success_count": transfer_success_count,
         }
 
+    @staticmethod
+    def _can_try_dir_fast_path(
+        context, save_dir, regex_pattern=None, regex_replace=None, folder_filter=None
+    ):
+        if not save_dir or regex_pattern or regex_replace or folder_filter:
+            return False
+        shared_paths = context.get("shared_paths") or []
+        if len(shared_paths) != 1:
+            return False
+        shared_path = shared_paths[0]
+        return bool(getattr(shared_path, "is_dir", False) and getattr(shared_path, "fs_id", None))
+
+    def _target_child_exists(self, dir_path, child_name):
+        if not child_name:
+            return False
+        for item in self.client.list(dir_path):
+            item_name = os.path.basename(str(getattr(item, "path", "")).rstrip("/"))
+            if item_name == child_name:
+                return True
+        return False
+
+    @staticmethod
+    def _dir_fast_path_target_dir(context, save_dir):
+        shared_path = context["shared_paths"][0]
+        folder_name = os.path.basename(str(getattr(shared_path, "path", "")).rstrip("/"))
+        return posixpath.join(save_dir, folder_name) if folder_name else save_dir
+
+    def _try_transfer_dir_fast_path(
+        self, context, share_url, save_dir, progress_callback=None
+    ):
+        shared_path = context["shared_paths"][0]
+        folder_name = os.path.basename(str(getattr(shared_path, "path", "")).rstrip("/"))
+        if progress_callback:
+            progress_callback("info", f"尝试整目录直接转存: {folder_name or shared_path.path}")
+
+        if not self.path_service.ensure_dir_exists(save_dir):
+            return {"success": False, "error": f"创建目录失败: {save_dir}"}
+        try:
+            target_exists = self._target_child_exists(save_dir, folder_name)
+        except Exception:
+            if progress_callback:
+                progress_callback("warning", "目标目录探测失败，回退逐文件对比转存")
+            return None
+        if target_exists:
+            if progress_callback:
+                progress_callback("info", "目标目录已存在，回退逐文件对比转存")
+            return None
+
+        try:
+            self._transfer_group(
+                save_dir,
+                [getattr(shared_path, "fs_id")],
+                share_url,
+                context["uk"],
+                context["share_id"],
+                context["bdstoken"],
+                None,
+            )
+        except Exception as exc:
+            if is_transfer_count_limit_error(exc):
+                if progress_callback:
+                    progress_callback(
+                        "warning",
+                        "整目录直接转存被百度拒绝，回退逐文件分批转存",
+                    )
+                return None
+            raise
+
+        message = f"整目录直接转存成功: {folder_name or shared_path.path}"
+        if progress_callback:
+            progress_callback("success", message)
+        return {
+            "success": True,
+            "partial": False,
+            "fast_path": True,
+            "message": message,
+            "transferred_files": [folder_name or str(getattr(shared_path, "path", ""))],
+            "completed_count": 1,
+            "transfer_success_count": 1,
+            "rename_failed_count": 0,
+        }
+
     def transfer_share(
         self,
         share_url,
@@ -1035,23 +1145,33 @@ class BaiduStorage:
             save_dir = self._normalize_save_dir(save_dir)
 
             try:
-                context = self._load_share_context(
-                    share_url, pwd, folder_filter, progress_callback
-                )
+                context = self._load_share_entries(share_url, pwd, progress_callback)
                 if not context:
                     return {"success": False, "error": "获取分享文件列表失败"}
 
+                transfer_target_dir = save_dir
+                if self._can_try_dir_fast_path(
+                    context, save_dir, regex_pattern, regex_replace, folder_filter
+                ):
+                    fast_path_result = self._try_transfer_dir_fast_path(
+                        context, share_url, save_dir, progress_callback
+                    )
+                    if fast_path_result is not None:
+                        return fast_path_result
+                    transfer_target_dir = self._dir_fast_path_target_dir(context, save_dir)
+
+                context = self._load_share_files(context, folder_filter, progress_callback)
                 candidates, transfer_summary, relative_dirs = self._prepare_transfer_candidates(
                     context["shared_files_info"],
                     context["shared_paths"],
-                    save_dir,
+                    transfer_target_dir,
                     regex_pattern,
                     regex_replace,
                 )
                 local_files_dict = {}
                 if candidates:
                     local_files_dict = self._scan_local_files_dict(
-                        save_dir, progress_callback, relative_dirs
+                        transfer_target_dir, progress_callback, relative_dirs
                     )
                 transfer_list = self._filter_transfer_candidates(
                     candidates,
@@ -1079,11 +1199,11 @@ class BaiduStorage:
                     context["uk"],
                     context["share_id"],
                     context["bdstoken"],
-                    save_dir,
+                    transfer_target_dir,
                     progress_callback,
                 )
                 rename_result = self._rename_transferred_files(
-                    successful_transfer_items, save_dir, progress_callback
+                    successful_transfer_items, transfer_target_dir, progress_callback
                 )
                 return self._build_transfer_result(
                     success_count,

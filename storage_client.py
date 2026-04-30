@@ -104,7 +104,7 @@ class BaiduClientAdapter:
         setattr(pcs_candidate, "_timeout_patched", True)
         logger.debug("成功注入超时设置并标记 '_timeout_patched'。")
 
-    def call_with_retry(self, func, *args, **kwargs):
+    def call_with_retry(self, func, *args, suppress_retry_abort=True, **kwargs):
         last_error = None
         logger = get_logger()
 
@@ -134,8 +134,10 @@ class BaiduClientAdapter:
                     logger.warning(f"网络请求最终失败，已重试{self.max_retries}次")
                     break
                 if is_retry_abort_error(exc):
-                    last_error = None
-                    break
+                    if suppress_retry_abort:
+                        last_error = None
+                        break
+                    raise
                 raise
 
         if last_error is not None:
@@ -212,4 +214,6 @@ class BaiduClientAdapter:
         return self.call_with_retry(self.client.list_shared_paths, *args, **kwargs)
 
     def transfer_shared_paths(self, **kwargs):
-        return self.call_with_retry(self.client.transfer_shared_paths, **kwargs)
+        return self.call_with_retry(
+            self.client.transfer_shared_paths, suppress_retry_abort=False, **kwargs
+        )

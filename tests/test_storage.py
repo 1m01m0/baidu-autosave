@@ -22,10 +22,12 @@ from storage import (
     BATCH_SHARE_DELAY,
     FREQUENCY_LIMIT_DELAY,
     RENAME_DELAY,
+    TRANSFER_BATCH_SIZE,
     _read_non_negative_float_env,
+    _read_positive_int_env,
 )
 from storage_client import BaiduClientAdapter
-from storage_errors import classify_storage_error, parse_share_error
+from storage_errors import classify_storage_error, is_transfer_count_limit_error, parse_share_error
 from storage_paths import StoragePathService
 from storage_rules import apply_regex_rules, should_include_folder
 from storage_shares import SharedPathService
@@ -97,6 +99,23 @@ class BaiduStoragePureMethodTests(unittest.TestCase):
             self.assertEqual(2, _read_non_negative_float_env(env_name, 2))
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(2, _read_non_negative_float_env(env_name, 2))
+
+    def test_read_positive_int_env_falls_back_for_invalid_values(self):
+        env_name = "TRANSFERSHARE_TEST_BATCH_SIZE"
+        with patch.dict(os.environ, {env_name: "999"}):
+            self.assertEqual(999, _read_positive_int_env(env_name, 1))
+        with patch.dict(os.environ, {env_name: "0"}):
+            self.assertEqual(1, _read_positive_int_env(env_name, 1))
+        with patch.dict(os.environ, {env_name: "bad"}):
+            self.assertEqual(1, _read_positive_int_env(env_name, 1))
+
+    def test_transfer_count_limit_error_detection(self):
+        self.assertTrue(is_transfer_count_limit_error("error_code: -33"))
+        self.assertTrue(is_transfer_count_limit_error("error_code: 120, message: 转存文件数超限"))
+        self.assertTrue(is_transfer_count_limit_error("error_code: 4, message: share transfer pcs error"))
+        self.assertTrue(is_transfer_count_limit_error("一次支持操作999个，减点试试吧"))
+        self.assertFalse(is_transfer_count_limit_error("error_code: 4, message: 请求被中止"))
+        self.assertFalse(is_transfer_count_limit_error("error_code: -32, message: 剩余空间不足"))
 
     def test_format_error_info_masks_share_urls_and_pwd(self):
         error = ValueError(
@@ -449,17 +468,17 @@ class BaiduStorageFlowTests(unittest.TestCase):
 
     def test_transfer_share_returns_skipped_when_no_transfer_candidates(self):
         self.storage._normalize_save_dir = Mock(return_value="/save")
-        self.storage._load_share_context = Mock(
-            return_value={
-                "shared_paths": [Mock(is_dir=False)],
-                "shared_files_info": [],
-                "uk": 1,
-                "share_id": 2,
-                "bdstoken": "token",
-            }
+        entry_context = {
+            "shared_paths": [Mock(is_dir=False)],
+            "uk": 1,
+            "share_id": 2,
+            "bdstoken": "token",
+        }
+        self.storage._load_share_entries = Mock(return_value=entry_context)
+        self.storage._load_share_files = Mock(
+            return_value={**entry_context, "shared_files_info": []}
         )
         self.storage._scan_local_files_dict = Mock(return_value={})
-        self.storage._build_transfer_list = Mock(return_value=[])
 
         result = self.storage.transfer_share("https://pan.baidu.com/s/abc")
 
@@ -470,17 +489,17 @@ class BaiduStorageFlowTests(unittest.TestCase):
 
     def test_transfer_share_returns_dir_error_directly(self):
         self.storage._normalize_save_dir = Mock(return_value="/save")
-        self.storage._load_share_context = Mock(
-            return_value={
-                "shared_paths": [Mock(is_dir=False)],
-                "shared_files_info": [{"fs_id": 1, "path": "a.txt"}],
-                "uk": 1,
-                "share_id": 2,
-                "bdstoken": "token",
-            }
+        entry_context = {
+            "shared_paths": [Mock(is_dir=False)],
+            "uk": 1,
+            "share_id": 2,
+            "bdstoken": "token",
+        }
+        self.storage._load_share_entries = Mock(return_value=entry_context)
+        self.storage._load_share_files = Mock(
+            return_value={**entry_context, "shared_files_info": [{"fs_id": 1, "path": "a.txt"}]}
         )
         self.storage._scan_local_files_dict = Mock(return_value={})
-        self.storage._build_transfer_list = Mock(return_value=[(1, "/save", "a.txt", "a.txt", False)])
         self.storage._ensure_transfer_dirs = Mock(
             return_value={"success": False, "error": "创建目录失败: /save"}
         )
@@ -501,18 +520,18 @@ class BaiduStorageFlowTests(unittest.TestCase):
 
     def test_transfer_share_executes_plan_and_builds_result(self):
         self.storage._normalize_save_dir = Mock(return_value="/save")
-        self.storage._load_share_context = Mock(
-            return_value={
-                "shared_paths": [Mock(is_dir=False)],
-                "shared_files_info": [{"fs_id": 1, "path": "a.txt"}],
-                "uk": 1,
-                "share_id": 2,
-                "bdstoken": "token",
-            }
+        entry_context = {
+            "shared_paths": [Mock(is_dir=False)],
+            "uk": 1,
+            "share_id": 2,
+            "bdstoken": "token",
+        }
+        self.storage._load_share_entries = Mock(return_value=entry_context)
+        self.storage._load_share_files = Mock(
+            return_value={**entry_context, "shared_files_info": [{"fs_id": 1, "path": "a.txt"}]}
         )
         self.storage._scan_local_files_dict = Mock(return_value={})
         transfer_list = [(1, "/save", "a.txt", "a.txt", False)]
-        self.storage._build_transfer_list = Mock(return_value=transfer_list)
         self.storage._ensure_transfer_dirs = Mock(return_value=None)
         self.storage._execute_transfer_plan = Mock(return_value=(1, transfer_list))
         rename_result = {
@@ -542,6 +561,153 @@ class BaiduStorageFlowTests(unittest.TestCase):
             },
             None,
         )
+
+    def test_transfer_share_uses_dir_fast_path_for_single_directory(self):
+        shared_dir = SimpleNamespace(is_dir=True, fs_id=10, path="/share/course")
+        entry_context = {
+            "shared_paths": [shared_dir],
+            "uk": 1,
+            "share_id": 2,
+            "bdstoken": "token",
+        }
+        self.storage._normalize_save_dir = Mock(return_value="/save")
+        self.storage._load_share_entries = Mock(return_value=entry_context)
+        self.storage._load_share_files = Mock()
+        self.storage.path_service.ensure_dir_exists.return_value = True
+        self.storage.client.list.return_value = []
+
+        result = self.storage.transfer_share("url", save_dir="/save")
+
+        self.assertTrue(result["success"])
+        self.assertTrue(result["fast_path"])
+        self.storage._load_share_files.assert_not_called()
+        self.storage.client.transfer_shared_paths.assert_called_once_with(
+            remotedir="/save",
+            fs_ids=[10],
+            uk=1,
+            share_id=2,
+            bdstoken="token",
+            shared_url="url",
+        )
+
+    def test_transfer_share_falls_back_when_dir_fast_path_hits_count_limit(self):
+        shared_dir = SimpleNamespace(is_dir=True, fs_id=10, path="/share/course")
+        entry_context = {
+            "shared_paths": [shared_dir],
+            "uk": 1,
+            "share_id": 2,
+            "bdstoken": "token",
+        }
+        self.storage._normalize_save_dir = Mock(return_value="/save")
+        self.storage._load_share_entries = Mock(return_value=entry_context)
+        self.storage._load_share_files = Mock(
+            return_value={**entry_context, "shared_files_info": [{"fs_id": 11, "path": "a.txt"}]}
+        )
+        self.storage.path_service.ensure_dir_exists.return_value = True
+        self.storage.client.list.return_value = []
+        self.storage.client.transfer_shared_paths.side_effect = RuntimeError(
+            "error_code: -33, message: 一次支持操作999个"
+        )
+        self.storage._scan_local_files_dict = Mock(return_value={})
+        transfer_list = [(11, "/save/course", "a.txt", "a.txt", False)]
+        self.storage._ensure_transfer_dirs = Mock(return_value=None)
+        self.storage._execute_transfer_plan = Mock(return_value=(1, transfer_list))
+        rename_result = {
+            "transferred_files": ["a.txt"],
+            "rename_failed_files": [],
+            "rename_failed_count": 0,
+            "completed_count": 1,
+        }
+        self.storage._rename_transferred_files = Mock(return_value=rename_result)
+        self.storage._build_transfer_result = Mock(return_value={"success": True})
+
+        result = self.storage.transfer_share("url", save_dir="/save")
+
+        self.assertTrue(result["success"])
+        self.storage._load_share_files.assert_called_once()
+        self.storage._scan_local_files_dict.assert_called_once_with("/save/course", None, {""})
+        self.storage._execute_transfer_plan.assert_called_once_with(
+            transfer_list, "url", 1, 2, "token", "/save/course", None
+        )
+
+    def test_transfer_share_does_not_fallback_for_unknown_fast_path_error(self):
+        shared_dir = SimpleNamespace(is_dir=True, fs_id=10, path="/share/course")
+        entry_context = {
+            "shared_paths": [shared_dir],
+            "uk": 1,
+            "share_id": 2,
+            "bdstoken": "token",
+        }
+        self.storage._normalize_save_dir = Mock(return_value="/save")
+        self.storage._load_share_entries = Mock(return_value=entry_context)
+        self.storage._load_share_files = Mock()
+        self.storage.path_service.ensure_dir_exists.return_value = True
+        self.storage.client.list.return_value = []
+        self.storage.client.transfer_shared_paths.side_effect = RuntimeError("boom")
+
+        result = self.storage.transfer_share("url", save_dir="/save")
+
+        self.assertFalse(result["success"])
+        self.assertEqual("boom", result["error"])
+        self.storage._load_share_files.assert_not_called()
+
+    def test_transfer_share_falls_back_when_target_folder_exists(self):
+        shared_dir = SimpleNamespace(is_dir=True, fs_id=10, path="/share/course")
+        entry_context = {
+            "shared_paths": [shared_dir],
+            "uk": 1,
+            "share_id": 2,
+            "bdstoken": "token",
+        }
+        self.storage._normalize_save_dir = Mock(return_value="/save")
+        self.storage._load_share_entries = Mock(return_value=entry_context)
+        self.storage._load_share_files = Mock(return_value={**entry_context, "shared_files_info": []})
+        self.storage.path_service.ensure_dir_exists.return_value = True
+        self.storage.client.list.return_value = [SimpleNamespace(path="/save/course")]
+
+        result = self.storage.transfer_share("url", save_dir="/save")
+
+        self.assertTrue(result["skipped"])
+        self.storage.client.transfer_shared_paths.assert_not_called()
+        self.storage._load_share_files.assert_called_once()
+
+    def test_transfer_share_falls_back_when_target_probe_fails(self):
+        shared_dir = SimpleNamespace(is_dir=True, fs_id=10, path="/share/course")
+        entry_context = {
+            "shared_paths": [shared_dir],
+            "uk": 1,
+            "share_id": 2,
+            "bdstoken": "token",
+        }
+        self.storage._normalize_save_dir = Mock(return_value="/save")
+        self.storage._load_share_entries = Mock(return_value=entry_context)
+        self.storage._load_share_files = Mock(return_value={**entry_context, "shared_files_info": []})
+        self.storage.path_service.ensure_dir_exists.return_value = True
+        self.storage.client.list.side_effect = RuntimeError("list failed")
+
+        result = self.storage.transfer_share("url", save_dir="/save")
+
+        self.assertTrue(result["skipped"])
+        self.storage.client.transfer_shared_paths.assert_not_called()
+        self.storage._load_share_files.assert_called_once()
+
+    def test_transfer_share_skips_dir_fast_path_when_regex_is_set(self):
+        shared_dir = SimpleNamespace(is_dir=True, fs_id=10, path="/share/course")
+        entry_context = {
+            "shared_paths": [shared_dir],
+            "uk": 1,
+            "share_id": 2,
+            "bdstoken": "token",
+        }
+        self.storage._normalize_save_dir = Mock(return_value="/save")
+        self.storage._load_share_entries = Mock(return_value=entry_context)
+        self.storage._load_share_files = Mock(return_value={**entry_context, "shared_files_info": []})
+
+        result = self.storage.transfer_share("url", save_dir="/save", regex_pattern="old")
+
+        self.assertTrue(result["skipped"])
+        self.storage.client.transfer_shared_paths.assert_not_called()
+        self.storage._load_share_files.assert_called_once()
 
     def test_process_single_share_config_handles_successful_result(self):
         self.storage.transfer_share = Mock(
@@ -710,6 +876,25 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.assertEqual(transfer_list, successful_items)
         sleep.assert_called_once_with(FREQUENCY_LIMIT_DELAY)
 
+    def test_execute_transfer_plan_splits_fs_ids_by_batch_size(self):
+        transfer_list = [
+            (fs_id, "/save", f"{fs_id}.txt", f"{fs_id}.txt", False)
+            for fs_id in range(TRANSFER_BATCH_SIZE * 2 + 1)
+        ]
+
+        with patch("storage.time.sleep"):
+            success_count, successful_items = self.storage._execute_transfer_plan(
+                transfer_list, "url", 1, 2, "token", "/save"
+            )
+
+        calls = self.storage.client.transfer_shared_paths.call_args_list
+        self.assertEqual(len(transfer_list), success_count)
+        self.assertEqual(transfer_list, successful_items)
+        self.assertEqual(3, len(calls))
+        self.assertEqual(TRANSFER_BATCH_SIZE, len(calls[0].kwargs["fs_ids"]))
+        self.assertEqual(TRANSFER_BATCH_SIZE, len(calls[1].kwargs["fs_ids"]))
+        self.assertEqual(1, len(calls[2].kwargs["fs_ids"]))
+
     def test_rename_transferred_files_sleeps_only_between_renames(self):
         self.storage.path_service.ensure_dir_exists.return_value = True
         transfer_items = [
@@ -821,6 +1006,19 @@ class BaiduClientAdapterTests(unittest.TestCase):
     def test_validate_cookies_requires_bduss_and_stoken(self):
         self.assertTrue(BaiduClientAdapter.validate_cookies({"BDUSS": "1", "STOKEN": "2"}))
         self.assertFalse(BaiduClientAdapter.validate_cookies({"BDUSS": "1"}))
+
+    def test_call_with_retry_can_raise_retry_abort_errors(self):
+        adapter = BaiduClientAdapter.__new__(BaiduClientAdapter)
+        adapter.max_retries = 1
+        adapter.is_github_actions = False
+        adapter.base_retry_delay = 0
+
+        def fail_with_code_4():
+            raise RuntimeError("error_code: 4, message: share transfer pcs error")
+
+        self.assertIsNone(adapter.call_with_retry(fail_with_code_4))
+        with self.assertRaises(RuntimeError):
+            adapter.call_with_retry(fail_with_code_4, suppress_retry_abort=False)
 
 
 if __name__ == "__main__":
