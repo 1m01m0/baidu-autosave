@@ -93,6 +93,19 @@ def classify_storage_error(error: ErrorLike) -> StorageErrorInfo:
             retryable=True,
         )
 
+    if code == "4" and (
+        "存储好像出问题了" in raw_message
+        or "稍候再试" in raw_message
+        or "try again" in lowered
+    ):
+        return StorageErrorInfo(
+            kind="network",
+            message="网盘存储临时异常，请稍后重试",
+            raw_message=raw_message,
+            code=code,
+            retryable=True,
+        )
+
     if code == "4":
         return StorageErrorInfo(
             kind="retry_abort",

@@ -109,6 +109,13 @@ class BaiduStoragePureMethodTests(unittest.TestCase):
         self.assertTrue(result.retryable)
         self.assertEqual("网盘接口返回非 JSON 响应，请稍后重试", result.message)
 
+    def test_classify_storage_error_treats_baidu_storage_issue_as_retryable_network(self):
+        result = classify_storage_error("error_code: 4, message: 存储好像出问题了，请稍候再试")
+
+        self.assertEqual("network", result.kind)
+        self.assertTrue(result.retryable)
+        self.assertEqual("网盘存储临时异常，请稍后重试", result.message)
+
     def test_read_non_negative_float_env_falls_back_for_invalid_values(self):
         env_name = "TRANSFERSHARE_TEST_DELAY"
         with patch.dict(os.environ, {env_name: "0.25"}):
@@ -1725,6 +1732,34 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.assertEqual([350, 300, 200, 150], batch_lengths)
         notify.assert_not_called()
 
+    def test_execute_transfer_plan_retries_json_decode_batch_with_smaller_batches(self):
+        self.storage.path_service.normalize_path.side_effect = lambda path, **kwargs: path
+        self.storage._scan_local_files_dict = Mock(return_value={})
+        transfer_list = [
+            (fs_id, "/save", f"{fs_id}.txt", f"{fs_id}.txt", False)
+            for fs_id in range(350)
+        ]
+        self.storage.client.transfer_shared_paths.side_effect = [
+            RequestsJSONDecodeError("Expecting value", "", 0),
+            None,
+            None,
+        ]
+
+        with patch("storage.time.sleep"), patch("storage.handle_error_and_notify") as notify:
+            success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
+                transfer_list, "url", 1, 2, "token", "/save"
+            )
+
+        batch_lengths = [
+            len(call_args.kwargs["fs_ids"])
+            for call_args in self.storage.client.transfer_shared_paths.call_args_list
+        ]
+        self.assertEqual(350, success_count)
+        self.assertEqual(transfer_list, successful_items)
+        self.assertEqual([], failed_items)
+        self.assertEqual([350, 300, 50], batch_lengths)
+        notify.assert_not_called()
+
     def test_execute_transfer_plan_retries_failed_items_only(self):
         self.storage.path_service.normalize_path.side_effect = lambda path, **kwargs: path
         transfer_list = [
@@ -2067,6 +2102,25 @@ class BaiduClientAdapterTests(unittest.TestCase):
 
         self.assertEqual("ok", adapter.call_with_retry(fail_once))
         self.assertEqual(2, len(calls))
+
+    def test_call_with_retry_retries_baidu_storage_issue(self):
+        adapter = BaiduClientAdapter.__new__(BaiduClientAdapter)
+        adapter.max_retries = 2
+        adapter.is_github_actions = False
+        adapter.base_retry_delay = 1
+        calls = []
+
+        def fail_once():
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("error_code: 4, message: 存储好像出问题了，请稍候再试")
+            return "ok"
+
+        with patch("storage_client.time.sleep") as sleep:
+            self.assertEqual("ok", adapter.call_with_retry(fail_once, suppress_retry_abort=False))
+
+        self.assertEqual(2, len(calls))
+        sleep.assert_called_once_with(1)
 
 
 if __name__ == "__main__":
