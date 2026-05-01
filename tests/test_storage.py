@@ -23,7 +23,7 @@ if "baidupcs_py" not in sys.modules:
 from storage import (
     BaiduStorage,
     BATCH_SHARE_DELAY,
-    FREQUENCY_LIMIT_DELAY,
+    RATE_LIMIT_WAIT_TIME,
     RENAME_DELAY,
     TRANSFER_BATCH_SIZE,
     _read_non_negative_float_env,
@@ -1643,7 +1643,7 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.assertEqual([], failed_items)
         self.storage._clear_local_files_cache.assert_called_once_with("/save")
 
-    def test_execute_transfer_plan_sleeps_only_between_groups(self):
+    def test_execute_transfer_plan_does_not_sleep_between_successful_groups(self):
         self.storage.path_service.normalize_path.side_effect = lambda path: path
         transfer_list = [
             (1, "/save/a", "a/1.txt", "a/1.txt", False),
@@ -1658,7 +1658,24 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.assertEqual(2, success_count)
         self.assertEqual(transfer_list, successful_items)
         self.assertEqual([], failed_items)
-        sleep.assert_called_once_with(FREQUENCY_LIMIT_DELAY)
+        sleep.assert_not_called()
+
+    def test_execute_transfer_plan_still_waits_before_rate_limit_retry(self):
+        self.storage.client.transfer_shared_paths.side_effect = [
+            RuntimeError("error_code: -65"),
+            None,
+        ]
+        transfer_item = (1, "/save", "a.txt", "a.txt", False)
+
+        with patch("storage.time.sleep") as sleep:
+            success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
+                [transfer_item], "url", 1, 2, "token", "/save"
+            )
+
+        self.assertEqual(1, success_count)
+        self.assertEqual([transfer_item], successful_items)
+        self.assertEqual([], failed_items)
+        sleep.assert_called_once_with(RATE_LIMIT_WAIT_TIME)
 
     def test_execute_transfer_plan_splits_fs_ids_by_batch_size(self):
         transfer_list = [
@@ -1679,6 +1696,34 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.assertEqual(TRANSFER_BATCH_SIZE, len(calls[0].kwargs["fs_ids"]))
         self.assertEqual(TRANSFER_BATCH_SIZE, len(calls[1].kwargs["fs_ids"]))
         self.assertEqual(1, len(calls[2].kwargs["fs_ids"]))
+
+    def test_execute_transfer_plan_retries_count_limit_batch_with_smaller_batches(self):
+        self.storage.path_service.normalize_path.side_effect = lambda path, **kwargs: path
+        transfer_list = [
+            (fs_id, "/save", f"{fs_id}.txt", f"{fs_id}.txt", False)
+            for fs_id in range(350)
+        ]
+        self.storage.client.transfer_shared_paths.side_effect = [
+            RuntimeError("error_code: 120, message: 转存文件数超限"),
+            RuntimeError("error_code: 120, message: 转存文件数超限"),
+            None,
+            None,
+        ]
+
+        with patch("storage.time.sleep"), patch("storage.handle_error_and_notify") as notify:
+            success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
+                transfer_list, "url", 1, 2, "token", "/save"
+            )
+
+        batch_lengths = [
+            len(call_args.kwargs["fs_ids"])
+            for call_args in self.storage.client.transfer_shared_paths.call_args_list
+        ]
+        self.assertEqual(350, success_count)
+        self.assertEqual(transfer_list, successful_items)
+        self.assertEqual([], failed_items)
+        self.assertEqual([350, 300, 200, 150], batch_lengths)
+        notify.assert_not_called()
 
     def test_execute_transfer_plan_retries_failed_items_only(self):
         self.storage.path_service.normalize_path.side_effect = lambda path, **kwargs: path

@@ -58,9 +58,6 @@ def _read_positive_int_env(name, default):
 
 # 常量定义
 RATE_LIMIT_WAIT_TIME = 10
-FREQUENCY_LIMIT_DELAY = _read_non_negative_float_env(
-    "TRANSFERSHARE_TRANSFER_GROUP_DELAY", 1
-)
 RENAME_DELAY = _read_non_negative_float_env("TRANSFERSHARE_RENAME_DELAY", 0.5)
 BATCH_SHARE_DELAY = _read_non_negative_float_env("TRANSFERSHARE_BATCH_SHARE_DELAY", 2)
 TRANSFER_BATCH_SIZE = _read_positive_int_env("TRANSFERSHARE_TRANSFER_BATCH_SIZE", 999)
@@ -977,14 +974,14 @@ class BaiduStorage:
                 "info", f"【步骤4/4】开始执行转存操作，共 {len(transfer_list)} 个文件"
             )
 
-        def build_entries(items, single_file=False):
+        def build_entries(items, batch_size):
             grouped_transfer_items = {}
             for item in items:
                 _, dir_path, _, _, _ = item
                 grouped_transfer_items.setdefault(dir_path, []).append(item)
 
             entries = []
-            batch_size = 1 if single_file else TRANSFER_BATCH_SIZE
+            batch_size = max(1, int(batch_size))
             for dir_path, dir_items in grouped_transfer_items.items():
                 for start in range(0, len(dir_items), batch_size):
                     batch_items = dir_items[start : start + batch_size]
@@ -992,12 +989,19 @@ class BaiduStorage:
                     entries.append((dir_path, batch_fs_ids, batch_items))
             return entries
 
+        def reduce_transfer_batch_size(batch_size):
+            for candidate in (300, 200, 100, 50, 20, 10, 5, 1):
+                if candidate < batch_size:
+                    return candidate
+            return 1
+
         successful_transfer_items = []
         successful_keys = set()
         failed_records = {}
         pending_items = list(transfer_list)
         max_attempt = TRANSFER_FAILED_RETRY_ATTEMPTS + 1
         attempt = 1
+        current_batch_size = TRANSFER_BATCH_SIZE
 
         scan_cache = {}
         local_files_cache_dirty = False
@@ -1020,9 +1024,12 @@ class BaiduStorage:
 
         try:
             while pending_items and attempt <= max_attempt:
-                single_file = attempt == max_attempt and attempt > 1
-                grouped_transfer_entries = build_entries(pending_items, single_file)
+                batch_size = 1 if attempt == max_attempt and attempt > 1 else current_batch_size
+                grouped_transfer_entries = build_entries(pending_items, batch_size)
                 next_pending = {}
+                reduced_batch_size = batch_size
+                count_limit_batch_reduced = False
+                regular_retry_needed = False
 
                 for index, (dir_path, fs_ids, batch_items) in enumerate(grouped_transfer_entries):
                     try:
@@ -1042,7 +1049,28 @@ class BaiduStorage:
                     except Exception as e:
                         mark_local_files_cache_dirty()
                         final_error = e
-                        if is_rate_limit_error(e):
+                        if is_transfer_count_limit_error(e) and len(batch_items) > 1:
+                            next_size = reduce_transfer_batch_size(len(batch_items))
+                            reduced_batch_size = min(reduced_batch_size, next_size)
+                            if progress_callback:
+                                progress_callback(
+                                    "warning",
+                                    f"转存批次超量，降低批量到 {next_size} 后重试: "
+                                    f"{dir_path} ({len(batch_items)} 个文件)",
+                                )
+                            for item in batch_items:
+                                key = self._transfer_item_key(item)
+                                if key not in successful_keys:
+                                    next_pending[key] = item
+                            for _, _, remaining_items in grouped_transfer_entries[index + 1 :]:
+                                for item in remaining_items:
+                                    key = self._transfer_item_key(item)
+                                    if key not in successful_keys:
+                                        next_pending[key] = item
+                            count_limit_batch_reduced = True
+                            final_error = None
+                            break
+                        elif is_rate_limit_error(e):
                             if progress_callback:
                                 progress_callback(
                                     "warning", f"触发频率限制，等待{RATE_LIMIT_WAIT_TIME}秒后重试..."
@@ -1099,22 +1127,23 @@ class BaiduStorage:
                                 if key in successful_keys:
                                     continue
                                 next_pending[key] = item
+                                regular_retry_needed = True
                                 failed_records[key] = self._build_transfer_failed_record(
                                     item, target_dir, error_info, attempt
                                 )
 
-                    if index < len(grouped_transfer_entries) - 1:
-                        time.sleep(FREQUENCY_LIMIT_DELAY)
-
                 pending_items = list(next_pending.values())
-                if pending_items and attempt < max_attempt:
+                if count_limit_batch_reduced:
+                    current_batch_size = reduced_batch_size
+                if pending_items and regular_retry_needed and attempt < max_attempt:
                     if progress_callback:
                         progress_callback(
                             "warning",
                             f"记录到 {len(pending_items)} 个转存失败文件，等待{TRANSFER_FAILED_RETRY_DELAY}秒后重试...",
                         )
                     time.sleep(TRANSFER_FAILED_RETRY_DELAY)
-                attempt += 1
+                if regular_retry_needed or not pending_items:
+                    attempt += 1
         finally:
             if local_files_cache_touched and target_dir:
                 self._clear_local_files_cache(target_dir)
