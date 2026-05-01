@@ -860,7 +860,12 @@ class BaiduStorage:
         }
 
     def _split_existing_transfer_items(
-        self, items, target_dir, progress_callback=None, scan_cache=None
+        self,
+        items,
+        target_dir,
+        progress_callback=None,
+        scan_cache=None,
+        force_refresh=False,
     ):
         if not target_dir:
             return [], list(items)
@@ -869,13 +874,26 @@ class BaiduStorage:
             relative_dirs = set()
             for _, _, clean_path, final_path, _ in items:
                 relative_dirs.update(self._candidate_parent_dirs(clean_path, final_path))
-            cache_key = (target_dir, tuple(sorted(relative_dirs)))
-            if scan_cache is not None and cache_key in scan_cache:
+            normalized_relative_dirs = tuple(
+                sorted(
+                    "" if relative_dir in ("", ".") else relative_dir
+                    for relative_dir in (
+                        str(relative_dir or "").replace("\\", "/").strip("/")
+                        for relative_dir in relative_dirs
+                    )
+                )
+            )
+            normalized_target_dir = self.path_service.normalize_path(target_dir)
+            cache_key = (normalized_target_dir, normalized_relative_dirs, True)
+            if force_refresh and scan_cache is not None:
+                scan_cache.clear()
+            if not force_refresh and scan_cache is not None and cache_key in scan_cache:
                 local_files_dict = scan_cache[cache_key]
             else:
-                self._clear_local_files_cache(target_dir)
+                if force_refresh:
+                    self._clear_local_files_cache(target_dir)
                 local_files_dict = self._scan_local_files_dict(
-                    target_dir, progress_callback, relative_dirs
+                    target_dir, progress_callback, set(normalized_relative_dirs)
                 )
                 if scan_cache is not None:
                     scan_cache[cache_key] = local_files_dict
@@ -982,10 +1000,16 @@ class BaiduStorage:
         attempt = 1
 
         scan_cache = {}
+        local_files_cache_dirty = False
+        local_files_cache_touched = False
+
+        def mark_local_files_cache_dirty():
+            nonlocal local_files_cache_dirty, local_files_cache_touched
+            if target_dir:
+                local_files_cache_dirty = True
+                local_files_cache_touched = True
 
         def add_successful_items(items):
-            if items:
-                scan_cache.clear()
             for item in items:
                 key = self._transfer_item_key(item)
                 if key in successful_keys:
@@ -994,95 +1018,106 @@ class BaiduStorage:
                 failed_records.pop(key, None)
                 successful_transfer_items.append(item)
 
-        while pending_items and attempt <= max_attempt:
-            single_file = attempt == max_attempt and attempt > 1
-            grouped_transfer_entries = build_entries(pending_items, single_file)
-            next_pending = {}
+        try:
+            while pending_items and attempt <= max_attempt:
+                single_file = attempt == max_attempt and attempt > 1
+                grouped_transfer_entries = build_entries(pending_items, single_file)
+                next_pending = {}
 
-            for index, (dir_path, fs_ids, batch_items) in enumerate(grouped_transfer_entries):
-                try:
-                    normalized_dir_path = self._transfer_group(
-                        dir_path,
-                        fs_ids,
-                        share_url,
-                        uk,
-                        share_id,
-                        bdstoken,
-                        progress_callback,
-                    )
-                    add_successful_items(batch_items)
-                    if target_dir:
-                        self._clear_local_files_cache(target_dir)
-                    if progress_callback:
-                        progress_callback("success", f"成功转存到 {normalized_dir_path}")
-                except Exception as e:
-                    final_error = e
-                    if is_rate_limit_error(e):
+                for index, (dir_path, fs_ids, batch_items) in enumerate(grouped_transfer_entries):
+                    try:
+                        normalized_dir_path = self._transfer_group(
+                            dir_path,
+                            fs_ids,
+                            share_url,
+                            uk,
+                            share_id,
+                            bdstoken,
+                            progress_callback,
+                        )
+                        mark_local_files_cache_dirty()
+                        add_successful_items(batch_items)
                         if progress_callback:
-                            progress_callback(
-                                "warning", f"触发频率限制，等待{RATE_LIMIT_WAIT_TIME}秒后重试..."
-                            )
-                        time.sleep(RATE_LIMIT_WAIT_TIME)
-                        try:
-                            normalized_dir_path = self._transfer_group(
-                                dir_path,
-                                fs_ids,
-                                share_url,
-                                uk,
-                                share_id,
-                                bdstoken,
-                                None,
-                            )
-                            add_successful_items(batch_items)
-                            if target_dir:
-                                self._clear_local_files_cache(target_dir)
+                            progress_callback("success", f"成功转存到 {normalized_dir_path}")
+                    except Exception as e:
+                        mark_local_files_cache_dirty()
+                        final_error = e
+                        if is_rate_limit_error(e):
                             if progress_callback:
-                                progress_callback("success", f"重试成功: {normalized_dir_path}")
-                            final_error = None
-                        except Exception as retry_e:
-                            final_error = retry_e
+                                progress_callback(
+                                    "warning", f"触发频率限制，等待{RATE_LIMIT_WAIT_TIME}秒后重试..."
+                                )
+                            time.sleep(RATE_LIMIT_WAIT_TIME)
+                            try:
+                                normalized_dir_path = self._transfer_group(
+                                    dir_path,
+                                    fs_ids,
+                                    share_url,
+                                    uk,
+                                    share_id,
+                                    bdstoken,
+                                    None,
+                                )
+                                mark_local_files_cache_dirty()
+                                add_successful_items(batch_items)
+                                if progress_callback:
+                                    progress_callback("success", f"重试成功: {normalized_dir_path}")
+                                final_error = None
+                            except Exception as retry_e:
+                                mark_local_files_cache_dirty()
+                                final_error = retry_e
 
-                    if final_error is not None:
-                        error_info = classify_storage_error(final_error)
-                        error_msg = f"转存失败: {dir_path} - {error_info.message}"
-                        if progress_callback:
-                            progress_callback("error", error_msg)
-                        handle_error_and_notify(
-                            final_error,
-                            f"转存失败: {dir_path}",
-                            self.wechat_notifier,
-                            None,
-                            collect=True,
-                        )
-                        existing_items, missing_items = self._split_existing_transfer_items(
-                            batch_items, target_dir, progress_callback, scan_cache
-                        )
-                        missing_keys = {self._transfer_item_key(item) for item in missing_items}
-                        for item in batch_items:
-                            if self._transfer_item_key(item) not in missing_keys:
-                                failed_records.pop(self._transfer_item_key(item), None)
-                        add_successful_items(existing_items)
-                        for item in missing_items:
-                            key = self._transfer_item_key(item)
-                            if key in successful_keys:
-                                continue
-                            next_pending[key] = item
-                            failed_records[key] = self._build_transfer_failed_record(
-                                item, target_dir, error_info, attempt
+                        if final_error is not None:
+                            error_info = classify_storage_error(final_error)
+                            error_msg = f"转存失败: {dir_path} - {error_info.message}"
+                            if progress_callback:
+                                progress_callback("error", error_msg)
+                            handle_error_and_notify(
+                                final_error,
+                                f"转存失败: {dir_path}",
+                                self.wechat_notifier,
+                                None,
+                                collect=True,
                             )
+                            force_refresh = local_files_cache_dirty
+                            existing_items, missing_items = self._split_existing_transfer_items(
+                                batch_items,
+                                target_dir,
+                                progress_callback,
+                                scan_cache,
+                                force_refresh=force_refresh,
+                            )
+                            if force_refresh:
+                                local_files_cache_dirty = False
+                            missing_keys = {self._transfer_item_key(item) for item in missing_items}
+                            for item in batch_items:
+                                if self._transfer_item_key(item) not in missing_keys:
+                                    failed_records.pop(self._transfer_item_key(item), None)
+                            add_successful_items(existing_items)
+                            for item in missing_items:
+                                key = self._transfer_item_key(item)
+                                if key in successful_keys:
+                                    continue
+                                next_pending[key] = item
+                                failed_records[key] = self._build_transfer_failed_record(
+                                    item, target_dir, error_info, attempt
+                                )
 
-                if index < len(grouped_transfer_entries) - 1:
-                    time.sleep(FREQUENCY_LIMIT_DELAY)
+                    if index < len(grouped_transfer_entries) - 1:
+                        time.sleep(FREQUENCY_LIMIT_DELAY)
 
-            pending_items = list(next_pending.values())
-            if pending_items and attempt < max_attempt:
-                if progress_callback:
-                    progress_callback(
-                        "warning",
-                        f"记录到 {len(pending_items)} 个转存失败文件，等待{TRANSFER_FAILED_RETRY_DELAY}秒后重试...",
-                    )
-                time.sleep(TRANSFER_FAILED_RETRY_DELAY)
-            attempt += 1
+                pending_items = list(next_pending.values())
+                if pending_items and attempt < max_attempt:
+                    if progress_callback:
+                        progress_callback(
+                            "warning",
+                            f"记录到 {len(pending_items)} 个转存失败文件，等待{TRANSFER_FAILED_RETRY_DELAY}秒后重试...",
+                        )
+                    time.sleep(TRANSFER_FAILED_RETRY_DELAY)
+                attempt += 1
+        finally:
+            if local_files_cache_touched and target_dir:
+                self._clear_local_files_cache(target_dir)
 
         return len(successful_transfer_items), successful_transfer_items, list(failed_records.values())
 

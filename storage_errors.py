@@ -5,6 +5,11 @@ from dataclasses import dataclass
 import re
 from typing import Optional, Union
 
+try:
+    from requests.exceptions import JSONDecodeError as RequestsJSONDecodeError
+except ImportError:  # pragma: no cover
+    RequestsJSONDecodeError = None
+
 
 _NETWORK_KEYWORDS = (
     "baidupcs._request",
@@ -60,6 +65,15 @@ def classify_storage_error(error: ErrorLike) -> StorageErrorInfo:
     raw_message = error_to_text(error)
     lowered = raw_message.lower()
     code = _match_error_code(raw_message)
+
+    if RequestsJSONDecodeError is not None and isinstance(error, RequestsJSONDecodeError):
+        return StorageErrorInfo(
+            kind="network",
+            message="网盘接口返回非 JSON 响应，请稍后重试",
+            raw_message=raw_message,
+            code=code,
+            retryable=True,
+        )
 
     if any(keyword in lowered for keyword in _NETWORK_KEYWORDS):
         return StorageErrorInfo(
