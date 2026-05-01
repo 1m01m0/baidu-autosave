@@ -1028,7 +1028,7 @@ class BaiduStorage:
                 grouped_transfer_entries = build_entries(pending_items, batch_size)
                 next_pending = {}
                 reduced_batch_size = batch_size
-                count_limit_batch_reduced = False
+                batch_size_reduced = False
                 regular_retry_needed = False
 
                 for index, (dir_path, fs_ids, batch_items) in enumerate(grouped_transfer_entries):
@@ -1067,7 +1067,7 @@ class BaiduStorage:
                                     key = self._transfer_item_key(item)
                                     if key not in successful_keys:
                                         next_pending[key] = item
-                            count_limit_batch_reduced = True
+                            batch_size_reduced = True
                             final_error = None
                             break
                         elif is_rate_limit_error(e):
@@ -1095,18 +1095,57 @@ class BaiduStorage:
                                 mark_local_files_cache_dirty()
                                 final_error = retry_e
 
+                        if final_error is not None and len(batch_items) > 1:
+                            error_info = classify_storage_error(final_error)
+                            if error_info.retryable:
+                                next_size = reduce_transfer_batch_size(len(batch_items))
+                                reduced_batch_size = min(reduced_batch_size, next_size)
+                                if progress_callback:
+                                    progress_callback(
+                                        "warning",
+                                        f"转存响应临时异常，降低批量到 {next_size} 后重试: "
+                                        f"{dir_path} ({len(batch_items)} 个文件)",
+                                    )
+                                force_refresh = local_files_cache_dirty
+                                existing_items, missing_items = self._split_existing_transfer_items(
+                                    batch_items,
+                                    target_dir,
+                                    progress_callback,
+                                    scan_cache,
+                                    force_refresh=force_refresh,
+                                )
+                                if force_refresh:
+                                    local_files_cache_dirty = False
+                                add_successful_items(existing_items)
+                                for item in missing_items:
+                                    key = self._transfer_item_key(item)
+                                    if key not in successful_keys:
+                                        next_pending[key] = item
+                                for _, _, remaining_items in grouped_transfer_entries[index + 1 :]:
+                                    for item in remaining_items:
+                                        key = self._transfer_item_key(item)
+                                        if key not in successful_keys:
+                                            next_pending[key] = item
+                                batch_size_reduced = True
+                                final_error = None
+                                break
+
                         if final_error is not None:
                             error_info = classify_storage_error(final_error)
                             error_msg = f"转存失败: {dir_path} - {error_info.message}"
                             if progress_callback:
-                                progress_callback("error", error_msg)
-                            handle_error_and_notify(
-                                final_error,
-                                f"转存失败: {dir_path}",
-                                self.wechat_notifier,
-                                None,
-                                collect=True,
-                            )
+                                progress_callback(
+                                    "warning" if error_info.retryable else "error",
+                                    error_msg,
+                                )
+                            if not error_info.retryable:
+                                handle_error_and_notify(
+                                    final_error,
+                                    f"转存失败: {dir_path}",
+                                    self.wechat_notifier,
+                                    None,
+                                    collect=True,
+                                )
                             force_refresh = local_files_cache_dirty
                             existing_items, missing_items = self._split_existing_transfer_items(
                                 batch_items,
@@ -1133,7 +1172,7 @@ class BaiduStorage:
                                 )
 
                 pending_items = list(next_pending.values())
-                if count_limit_batch_reduced:
+                if batch_size_reduced:
                     current_batch_size = reduced_batch_size
                 if pending_items and regular_retry_needed and attempt < max_attempt:
                     if progress_callback:
