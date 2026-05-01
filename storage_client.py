@@ -42,6 +42,7 @@ class BaiduClientAdapter:
     def __init__(self, cookies):
         self._client_lock = Lock()
         self.client = None
+        self._quota_info = None
         self.default_timeout = DEFAULT_REQUEST_TIMEOUT
         self.is_github_actions = os.getenv("GITHUB_ACTIONS") == "true"
         self.base_retry_delay = (
@@ -157,7 +158,7 @@ class BaiduClientAdapter:
                         os.getenv("BAIDU_REQUEST_TIMEOUT", str(DEFAULT_REQUEST_TIMEOUT))
                     )
                     self._inject_timeout()
-                    self.client.quota()
+                    self._quota_info = self.client.quota()
                     return True
                 except Exception as exc:
                     if retry < 2:
@@ -192,8 +193,11 @@ class BaiduClientAdapter:
             cookies[key.strip()] = value.strip()
         return cookies
 
-    def quota(self):
-        return self.client.quota()
+    def quota(self, refresh=False):
+        if not refresh and self._quota_info is not None:
+            return self._quota_info
+        self._quota_info = self.client.quota()
+        return self._quota_info
 
     def list(self, path):
         return self.client.list(path)

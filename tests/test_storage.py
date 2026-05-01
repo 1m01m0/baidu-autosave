@@ -1974,6 +1974,26 @@ class BaiduClientAdapterTests(unittest.TestCase):
         self.assertTrue(BaiduClientAdapter.validate_cookies({"BDUSS": "1", "STOKEN": "2"}))
         self.assertFalse(BaiduClientAdapter.validate_cookies({"BDUSS": "1"}))
 
+    def test_quota_reuses_initialized_cache(self):
+        adapter = BaiduClientAdapter.__new__(BaiduClientAdapter)
+        adapter.client = Mock()
+        adapter._quota_info = (100, 20)
+
+        self.assertEqual((100, 20), adapter.quota())
+
+        adapter.client.quota.assert_not_called()
+
+    def test_quota_refresh_updates_cache(self):
+        adapter = BaiduClientAdapter.__new__(BaiduClientAdapter)
+        adapter.client = Mock()
+        adapter.client.quota.return_value = (200, 50)
+        adapter._quota_info = (100, 20)
+
+        self.assertEqual((200, 50), adapter.quota(refresh=True))
+        self.assertEqual((200, 50), adapter.quota())
+
+        adapter.client.quota.assert_called_once_with()
+
     def test_call_with_retry_can_raise_retry_abort_errors(self):
         adapter = BaiduClientAdapter.__new__(BaiduClientAdapter)
         adapter.max_retries = 1
