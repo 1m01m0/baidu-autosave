@@ -12,7 +12,7 @@ import time
 # 添加 WeChatNotifier 和工具方法导入
 from wechat_notifier import WeChatNotifier
 from utils import handle_error_and_notify, ErrorCollector, mask_share_url
-from config_utils import parse_share_links_from_text
+from config_utils import build_retry_share_config, parse_share_links_from_text
 from storage_client import BaiduClientAdapter
 from storage_errors import (
     classify_storage_error,
@@ -64,6 +64,12 @@ FREQUENCY_LIMIT_DELAY = _read_non_negative_float_env(
 RENAME_DELAY = _read_non_negative_float_env("TRANSFERSHARE_RENAME_DELAY", 0.5)
 BATCH_SHARE_DELAY = _read_non_negative_float_env("TRANSFERSHARE_BATCH_SHARE_DELAY", 2)
 TRANSFER_BATCH_SIZE = _read_positive_int_env("TRANSFERSHARE_TRANSFER_BATCH_SIZE", 999)
+TRANSFER_FAILED_RETRY_ATTEMPTS = _read_positive_int_env(
+    "TRANSFERSHARE_TRANSFER_FAILED_RETRY_ATTEMPTS", 2
+)
+TRANSFER_FAILED_RETRY_DELAY = _read_non_negative_float_env(
+    "TRANSFERSHARE_TRANSFER_FAILED_RETRY_DELAY", 5
+)
 
 
 class BaiduStorage:
@@ -155,8 +161,9 @@ class BaiduStorage:
         if progress_callback:
             progress_callback(level, f"【{index}/{total_count}】{message}")
 
-    def _build_result_record(self, index, share_url, save_dir, result):
+    def _build_result_record(self, index, share_url, save_dir, result, source_config=None):
         masked_share_url = mask_share_url(share_url) or share_url
+        transfer_failed_files = result.get("transfer_failed_files", [])
         record = {
             "index": index,
             "share_url": masked_share_url,
@@ -174,12 +181,23 @@ class BaiduStorage:
         elif result.get("partial"):
             record["message"] = result.get("message", "部分转存成功")
             record["transferred_files"] = result.get("transferred_files", [])
+            record["transfer_failed_files"] = transfer_failed_files
+            record["transfer_failed_count"] = result.get(
+                "transfer_failed_count", len(transfer_failed_files)
+            )
             record["rename_failed_files"] = result.get("rename_failed_files", [])
             record["rename_failed_count"] = result.get("rename_failed_count", 0)
             record["completed_count"] = result.get("completed_count", 0)
             record["transfer_success_count"] = result.get("transfer_success_count", 0)
         else:
             record["error"] = result.get("error", "未知错误")
+            record["transfer_failed_files"] = transfer_failed_files
+            record["transfer_failed_count"] = result.get(
+                "transfer_failed_count", len(transfer_failed_files)
+            )
+
+        if transfer_failed_files and source_config:
+            record["retry_config"] = build_retry_share_config(source_config)
         return record
 
     def _record_batch_result(self, counters, result_record):
@@ -238,7 +256,7 @@ class BaiduStorage:
             folder_filter=folder_filter,
             exclude_folder_filter=exclude_folder_filter,
         )
-        result_record = self._build_result_record(index, share_url, save_dir, result)
+        result_record = self._build_result_record(index, share_url, save_dir, result, config)
 
         if result.get("success"):
             if result.get("skipped"):
@@ -365,8 +383,15 @@ class BaiduStorage:
                 has_partial_items or has_failed_items
             )
             all_rename_failed_files = []
+            all_transfer_failed_files = []
             for item in results:
                 all_rename_failed_files.extend(item.get("rename_failed_files", []))
+                for failed_file in item.get("transfer_failed_files", []):
+                    failed_detail = dict(failed_file)
+                    failed_detail.setdefault("index", item.get("index"))
+                    failed_detail.setdefault("share_url", item.get("share_url"))
+                    failed_detail.setdefault("save_dir", item.get("save_dir"))
+                    all_transfer_failed_files.append(failed_detail)
 
             summary = self._build_batch_summary(
                 total_count,
@@ -399,6 +424,8 @@ class BaiduStorage:
                 "failed_count": counters["failed_count"],
                 "skipped_count": counters["skipped_count"],
                 "results": results,
+                "transfer_failed_files": all_transfer_failed_files,
+                "transfer_failed_count": len(all_transfer_failed_files),
                 "rename_failed_files": all_rename_failed_files,
                 "rename_failed_count": len(all_rename_failed_files),
                 "summary": summary,
@@ -813,6 +840,66 @@ class BaiduStorage:
         for key in cache_keys:
             self._local_files_cache.pop(key, None)
 
+    @staticmethod
+    def _transfer_item_key(item):
+        fs_id, dir_path, clean_path, final_path, _ = item
+        return (str(fs_id), dir_path or "", clean_path or "", final_path or "")
+
+    def _build_transfer_failed_record(self, item, target_dir, error_info, attempts):
+        fs_id, dir_path, clean_path, final_path, need_rename = item
+        return {
+            "fs_id": fs_id,
+            "target_dir": target_dir,
+            "dir_path": dir_path,
+            "clean_path": clean_path,
+            "final_path": final_path,
+            "need_rename": need_rename,
+            "error": error_info.message,
+            "error_code": error_info.code,
+            "attempts": attempts,
+        }
+
+    def _split_existing_transfer_items(
+        self, items, target_dir, progress_callback=None, scan_cache=None
+    ):
+        if not target_dir:
+            return [], list(items)
+
+        try:
+            relative_dirs = set()
+            for _, _, clean_path, final_path, _ in items:
+                relative_dirs.update(self._candidate_parent_dirs(clean_path, final_path))
+            cache_key = (target_dir, tuple(sorted(relative_dirs)))
+            if scan_cache is not None and cache_key in scan_cache:
+                local_files_dict = scan_cache[cache_key]
+            else:
+                self._clear_local_files_cache(target_dir)
+                local_files_dict = self._scan_local_files_dict(
+                    target_dir, progress_callback, relative_dirs
+                )
+                if scan_cache is not None:
+                    scan_cache[cache_key] = local_files_dict
+        except Exception:
+            return [], list(items)
+
+        existing_items = []
+        missing_items = []
+        for item in items:
+            fs_id, dir_path, clean_path, final_path, need_rename = item
+            clean_normalized = self.path_service.normalize_path(str(clean_path or "").lstrip("/"))
+            final_normalized = self.path_service.normalize_path(str(final_path or "").lstrip("/"))
+            clean_exists = clean_normalized in local_files_dict
+            final_exists = final_normalized in local_files_dict
+
+            if need_rename and final_exists:
+                existing_items.append((fs_id, dir_path, final_path, final_path, False))
+            elif clean_exists or (not need_rename and final_exists):
+                existing_items.append(item)
+            else:
+                missing_items.append(item)
+
+        return existing_items, missing_items
+
     def _ensure_transfer_dirs(self, transfer_list):
         created_dirs = set()
         for _, dir_path, _, _, _ in transfer_list:
@@ -872,88 +959,132 @@ class BaiduStorage:
                 "info", f"【步骤4/4】开始执行转存操作，共 {len(transfer_list)} 个文件"
             )
 
-        grouped_transfer_items = {}
-        for item in transfer_list:
-            _, dir_path, _, _, _ = item
-            grouped_transfer_items.setdefault(dir_path, []).append(item)
+        def build_entries(items, single_file=False):
+            grouped_transfer_items = {}
+            for item in items:
+                _, dir_path, _, _, _ = item
+                grouped_transfer_items.setdefault(dir_path, []).append(item)
 
-        success_count = 0
+            entries = []
+            batch_size = 1 if single_file else TRANSFER_BATCH_SIZE
+            for dir_path, dir_items in grouped_transfer_items.items():
+                for start in range(0, len(dir_items), batch_size):
+                    batch_items = dir_items[start : start + batch_size]
+                    batch_fs_ids = [item[0] for item in batch_items]
+                    entries.append((dir_path, batch_fs_ids, batch_items))
+            return entries
+
         successful_transfer_items = []
-        grouped_transfer_entries = []
-        for dir_path, items in grouped_transfer_items.items():
-            for start in range(0, len(items), TRANSFER_BATCH_SIZE):
-                batch_items = items[start : start + TRANSFER_BATCH_SIZE]
-                batch_fs_ids = [item[0] for item in batch_items]
-                grouped_transfer_entries.append((dir_path, batch_fs_ids, batch_items))
+        successful_keys = set()
+        failed_records = {}
+        pending_items = list(transfer_list)
+        max_attempt = TRANSFER_FAILED_RETRY_ATTEMPTS + 1
+        attempt = 1
 
-        for index, (dir_path, fs_ids, batch_items) in enumerate(grouped_transfer_entries):
-            try:
-                normalized_dir_path = self._transfer_group(
-                    dir_path,
-                    fs_ids,
-                    share_url,
-                    uk,
-                    share_id,
-                    bdstoken,
-                    progress_callback,
-                )
-                success_count += len(batch_items)
-                successful_transfer_items.extend(batch_items)
-                if target_dir:
-                    self._clear_local_files_cache(target_dir)
-                if progress_callback:
-                    progress_callback("success", f"成功转存到 {normalized_dir_path}")
-            except Exception as e:
-                if is_rate_limit_error(e):
+        scan_cache = {}
+
+        def add_successful_items(items):
+            if items:
+                scan_cache.clear()
+            for item in items:
+                key = self._transfer_item_key(item)
+                if key in successful_keys:
+                    continue
+                successful_keys.add(key)
+                failed_records.pop(key, None)
+                successful_transfer_items.append(item)
+
+        while pending_items and attempt <= max_attempt:
+            single_file = attempt == max_attempt and attempt > 1
+            grouped_transfer_entries = build_entries(pending_items, single_file)
+            next_pending = {}
+
+            for index, (dir_path, fs_ids, batch_items) in enumerate(grouped_transfer_entries):
+                try:
+                    normalized_dir_path = self._transfer_group(
+                        dir_path,
+                        fs_ids,
+                        share_url,
+                        uk,
+                        share_id,
+                        bdstoken,
+                        progress_callback,
+                    )
+                    add_successful_items(batch_items)
+                    if target_dir:
+                        self._clear_local_files_cache(target_dir)
                     if progress_callback:
-                        progress_callback(
-                            "warning", f"触发频率限制，等待{RATE_LIMIT_WAIT_TIME}秒后重试..."
-                        )
-                    time.sleep(RATE_LIMIT_WAIT_TIME)
-                    try:
-                        normalized_dir_path = self._transfer_group(
-                            dir_path,
-                            fs_ids,
-                            share_url,
-                            uk,
-                            share_id,
-                            bdstoken,
-                            None,
-                        )
-                        success_count += len(batch_items)
-                        successful_transfer_items.extend(batch_items)
-                        if target_dir:
-                            self._clear_local_files_cache(target_dir)
+                        progress_callback("success", f"成功转存到 {normalized_dir_path}")
+                except Exception as e:
+                    final_error = e
+                    if is_rate_limit_error(e):
                         if progress_callback:
-                            progress_callback("success", f"重试成功: {normalized_dir_path}")
-                    except Exception as retry_e:
-                        retry_error = classify_storage_error(retry_e)
-                        error_msg = f"转存失败: {dir_path} - {retry_error.message}"
+                            progress_callback(
+                                "warning", f"触发频率限制，等待{RATE_LIMIT_WAIT_TIME}秒后重试..."
+                            )
+                        time.sleep(RATE_LIMIT_WAIT_TIME)
+                        try:
+                            normalized_dir_path = self._transfer_group(
+                                dir_path,
+                                fs_ids,
+                                share_url,
+                                uk,
+                                share_id,
+                                bdstoken,
+                                None,
+                            )
+                            add_successful_items(batch_items)
+                            if target_dir:
+                                self._clear_local_files_cache(target_dir)
+                            if progress_callback:
+                                progress_callback("success", f"重试成功: {normalized_dir_path}")
+                            final_error = None
+                        except Exception as retry_e:
+                            final_error = retry_e
+
+                    if final_error is not None:
+                        error_info = classify_storage_error(final_error)
+                        error_msg = f"转存失败: {dir_path} - {error_info.message}"
                         if progress_callback:
                             progress_callback("error", error_msg)
                         handle_error_and_notify(
-                            retry_e,
+                            final_error,
                             f"转存失败: {dir_path}",
                             self.wechat_notifier,
                             None,
                             collect=True,
                         )
-                else:
-                    error_info = classify_storage_error(e)
-                    error_msg = f"转存失败: {dir_path} - {error_info.message}"
-                    if progress_callback:
-                        progress_callback("error", error_msg)
-                    handle_error_and_notify(
-                        e,
-                        f"转存失败: {dir_path}",
-                        self.wechat_notifier,
-                        None,
-                        collect=True,
-                    )
-            if index < len(grouped_transfer_entries) - 1:
-                time.sleep(FREQUENCY_LIMIT_DELAY)
+                        existing_items, missing_items = self._split_existing_transfer_items(
+                            batch_items, target_dir, progress_callback, scan_cache
+                        )
+                        missing_keys = {self._transfer_item_key(item) for item in missing_items}
+                        for item in batch_items:
+                            if self._transfer_item_key(item) not in missing_keys:
+                                failed_records.pop(self._transfer_item_key(item), None)
+                        add_successful_items(existing_items)
+                        for item in missing_items:
+                            key = self._transfer_item_key(item)
+                            if key in successful_keys:
+                                continue
+                            next_pending[key] = item
+                            failed_records[key] = self._build_transfer_failed_record(
+                                item, target_dir, error_info, attempt
+                            )
 
-        return success_count, successful_transfer_items
+                if index < len(grouped_transfer_entries) - 1:
+                    time.sleep(FREQUENCY_LIMIT_DELAY)
+
+            pending_items = list(next_pending.values())
+            if pending_items and attempt < max_attempt:
+                if progress_callback:
+                    progress_callback(
+                        "warning",
+                        f"记录到 {len(pending_items)} 个转存失败文件，等待{TRANSFER_FAILED_RETRY_DELAY}秒后重试...",
+                    )
+                time.sleep(TRANSFER_FAILED_RETRY_DELAY)
+            attempt += 1
+
+        return len(successful_transfer_items), successful_transfer_items, list(failed_records.values())
 
     def _rename_transferred_files(self, successful_transfer_items, target_dir, progress_callback=None):
         renamed_files = []
@@ -1018,13 +1149,16 @@ class BaiduStorage:
         total_files,
         rename_result,
         progress_callback=None,
+        transfer_failed_files=None,
     ):
         renamed_files = rename_result.get("transferred_files", [])
         rename_failed_files = rename_result.get("rename_failed_files", [])
         rename_failed_count = rename_result.get("rename_failed_count", 0)
         completed_count = rename_result.get("completed_count", 0)
+        transfer_failed_files = transfer_failed_files or []
+        transfer_failed_count = len(transfer_failed_files)
 
-        if completed_count == total_files:
+        if completed_count == total_files and transfer_failed_count == 0:
             message = f"成功转存 {completed_count}/{total_files} 个文件"
             if progress_callback:
                 progress_callback("success", f"转存完成，{message}")
@@ -1039,13 +1173,14 @@ class BaiduStorage:
             }
 
         if completed_count > 0 or transfer_success_count > 0:
+            message = f"部分转存成功，成功完成 {completed_count}/{total_files} 个文件"
+            failed_parts = []
+            if transfer_failed_count > 0:
+                failed_parts.append(f"另有 {transfer_failed_count} 个文件转存失败")
             if rename_failed_count > 0:
-                message = (
-                    f"部分转存成功，成功完成 {completed_count}/{total_files} 个文件，"
-                    f"另有 {rename_failed_count} 个文件转存后重命名失败"
-                )
-            else:
-                message = f"部分转存成功，成功完成 {completed_count}/{total_files} 个文件"
+                failed_parts.append(f"另有 {rename_failed_count} 个文件转存后重命名失败")
+            if failed_parts:
+                message = f"{message}，" + "，".join(failed_parts)
             if progress_callback:
                 progress_callback("warning", message)
             return {
@@ -1054,15 +1189,20 @@ class BaiduStorage:
                 "message": message,
                 "error": message,
                 "transferred_files": renamed_files,
+                "transfer_failed_files": transfer_failed_files,
+                "transfer_failed_count": transfer_failed_count,
                 "rename_failed_files": rename_failed_files,
                 "rename_failed_count": rename_failed_count,
                 "completed_count": completed_count,
                 "transfer_success_count": transfer_success_count,
             }
 
+        error = "转存失败，没有文件成功转存"
+        if transfer_failed_count > 0:
+            error = f"转存失败，{transfer_failed_count}/{total_files} 个文件转存失败"
         handle_error_and_notify(
-            ValueError("转存失败，没有文件成功转存"),
-            "转存失败，没有文件成功转存",
+            ValueError(error),
+            error,
             self.wechat_notifier,
             None,
             collect=True,
@@ -1070,7 +1210,9 @@ class BaiduStorage:
         return {
             "success": False,
             "partial": False,
-            "error": "转存失败，没有文件成功转存",
+            "error": error,
+            "transfer_failed_files": transfer_failed_files,
+            "transfer_failed_count": transfer_failed_count,
             "rename_failed_files": rename_failed_files,
             "rename_failed_count": rename_failed_count,
             "completed_count": completed_count,
@@ -1112,6 +1254,7 @@ class BaiduStorage:
             "skipped_dir_count": 0,
             "failed_count": 0,
             "transferred_files": [],
+            "transfer_failed_files": [],
         }
 
     @staticmethod
@@ -1121,6 +1264,8 @@ class BaiduStorage:
         skipped_dir_count = stats["skipped_dir_count"]
         failed_count = stats["failed_count"]
         transferred_files = stats["transferred_files"]
+        transfer_failed_files = stats.get("transfer_failed_files", [])
+        transfer_failed_count = len(transfer_failed_files)
 
         if transfer_success_count and failed_count:
             message = (
@@ -1136,6 +1281,8 @@ class BaiduStorage:
                 "message": message,
                 "error": message,
                 "transferred_files": transferred_files,
+                "transfer_failed_files": transfer_failed_files,
+                "transfer_failed_count": transfer_failed_count,
                 "completed_count": completed_count,
                 "transfer_success_count": transfer_success_count,
                 "skipped_dir_count": skipped_dir_count,
@@ -1156,6 +1303,8 @@ class BaiduStorage:
                 "divide_path": True,
                 "message": message,
                 "transferred_files": transferred_files,
+                "transfer_failed_files": transfer_failed_files,
+                "transfer_failed_count": transfer_failed_count,
                 "completed_count": completed_count,
                 "transfer_success_count": transfer_success_count,
                 "skipped_dir_count": skipped_dir_count,
@@ -1172,6 +1321,8 @@ class BaiduStorage:
                 "partial": False,
                 "divide_path": True,
                 "error": error,
+                "transfer_failed_files": transfer_failed_files,
+                "transfer_failed_count": transfer_failed_count,
                 "completed_count": completed_count,
                 "transfer_success_count": transfer_success_count,
                 "skipped_dir_count": skipped_dir_count,
@@ -1209,8 +1360,7 @@ class BaiduStorage:
         if not file_transfer_list:
             return
 
-        total_count = len(file_transfer_list)
-        success_count, successful_items = self._execute_transfer_plan(
+        success_count, successful_items, failed_items = self._execute_transfer_plan(
             file_transfer_list,
             share_url,
             context["uk"],
@@ -1222,7 +1372,8 @@ class BaiduStorage:
         stats["transfer_success_count"] += success_count
         stats["completed_count"] += success_count
         stats["transferred_files"].extend(item[3] for item in successful_items)
-        stats["failed_count"] += total_count - success_count
+        stats["transfer_failed_files"].extend(failed_items)
+        stats["failed_count"] += len(failed_items)
         file_transfer_list.clear()
 
     def _transfer_dir_tree_divide_collect(
@@ -1481,6 +1632,13 @@ class BaiduStorage:
                     exclude_folder_filter,
                     progress_callback,
                 )
+            try:
+                if self._target_child_exists(save_dir, folder_name):
+                    if progress_callback:
+                        progress_callback("warning", "整目录直接转存失败但目标目录已存在，回退逐文件对比转存")
+                    return None
+            except Exception:
+                pass
             raise
 
         message = f"整目录直接转存成功: {folder_name or shared_path.path}"
@@ -1555,6 +1713,7 @@ class BaiduStorage:
         total_transfer_count = 0
         transfer_success_count = 0
         successful_transfer_items = []
+        transfer_failed_files = []
         dir_error = None
 
         def flush_transfer_item_buffer(force=False):
@@ -1572,7 +1731,7 @@ class BaiduStorage:
             if dir_error:
                 return dir_error
 
-            success_count, successful_items = self._execute_transfer_plan(
+            success_count, successful_items, failed_items = self._execute_transfer_plan(
                 transfer_list,
                 share_url,
                 context["uk"],
@@ -1584,6 +1743,7 @@ class BaiduStorage:
             total_transfer_count += len(transfer_list)
             transfer_success_count += success_count
             successful_transfer_items.extend(successful_items)
+            transfer_failed_files.extend(failed_items)
             return None
 
         def flush_shared_file_batch():
@@ -1652,6 +1812,7 @@ class BaiduStorage:
                     total_transfer_count,
                     rename_result,
                     progress_callback,
+                    transfer_failed_files,
                 )
                 error_msg = dir_error.get("error", "创建目录失败")
                 result.update(
@@ -1685,6 +1846,7 @@ class BaiduStorage:
             total_transfer_count,
             rename_result,
             progress_callback,
+            transfer_failed_files,
         )
         if scan_error:
             error_msg = parse_share_error(scan_error)

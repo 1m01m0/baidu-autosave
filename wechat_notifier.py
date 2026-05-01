@@ -162,28 +162,21 @@ class WeChatNotifier:
         except Exception:
             return None
 
-    def _format_files_info(self, transferred_files: List[str]) -> str:
-        """
-        格式化文件信息
-        Args:
-            transferred_files: 转存的文件列表
-        Returns:
-            格式化的文件信息字符串
-        """
-        if not transferred_files:
+    @staticmethod
+    def _format_limited_items(title: str, items: List[Any], formatter) -> str:
+        if not items:
             return ""
 
-        shown_files = transferred_files[:MAX_FILES_TO_SHOW]
-        files_info = "\n**转存文件**:\n" + "\n".join(
-            [f"• {file}" for file in shown_files]
+        shown_items = items[:MAX_FILES_TO_SHOW]
+        info = f"\n**{title}**:\n" + "\n".join(
+            [f"• {formatter(item)}" for item in shown_items]
         )
+        if len(items) > MAX_FILES_TO_SHOW:
+            info += f"\n• ... 还有 {len(items) - MAX_FILES_TO_SHOW} 个文件"
+        return info
 
-        if len(transferred_files) > MAX_FILES_TO_SHOW:
-            files_info += (
-                f"\n• ... 还有 {len(transferred_files) - MAX_FILES_TO_SHOW} 个文件"
-            )
-
-        return files_info
+    def _format_files_info(self, transferred_files: List[str]) -> str:
+        return self._format_limited_items("转存文件", transferred_files, lambda item: item)
 
     def _collect_transferred_files(self, result: Dict[str, Any]) -> List[str]:
         """
@@ -243,26 +236,24 @@ class WeChatNotifier:
 **结果**: {result_msg}{files_info}"""
         elif result.get("partial"):
             error_msg = result.get("error", "部分转存成功")
+            transfer_failed_files = result.get("transfer_failed_files", [])
+            transfer_failed_info = self._format_limited_items(
+                "转存失败",
+                transfer_failed_files,
+                lambda item: f"{item.get('final_path') or item.get('clean_path')}: {item.get('error')}",
+            )
             rename_failed_files = result.get("rename_failed_files", [])
-            rename_failed_info = ""
-            if rename_failed_files:
-                shown = rename_failed_files[:MAX_FILES_TO_SHOW]
-                rename_failed_info = "\n**重命名失败**:\n" + "\n".join(
-                    [
-                        f"• {item.get('source_path')} -> {item.get('target_path')}: {item.get('error')}"
-                        for item in shown
-                    ]
-                )
-                if len(rename_failed_files) > MAX_FILES_TO_SHOW:
-                    rename_failed_info += (
-                        f"\n• ... 还有 {len(rename_failed_files) - MAX_FILES_TO_SHOW} 个文件"
-                    )
+            rename_failed_info = self._format_limited_items(
+                "重命名失败",
+                rename_failed_files,
+                lambda item: f"{item.get('source_path')} -> {item.get('target_path')}: {item.get('error')}",
+            )
             message = f"""## ⚠️ 百度网盘转存报告
 **时间**: {current_time}
 **状态**: ⚠️ 部分成功（按失败处理，退出码 1）
 **任务**: {task_desc}
 **保存目录**: {save_dir}
-**结果**: {error_msg}{rename_failed_info}"""
+**结果**: {error_msg}{transfer_failed_info}{rename_failed_info}"""
         else:
             # 转存失败
             error_msg = result.get("error", "未知错误")

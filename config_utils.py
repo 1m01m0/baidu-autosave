@@ -8,10 +8,36 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Union
 
 DEFAULT_SAVE_DIR = "/AutoTransfer"
+RETRY_SHARE_CONFIG_KEYS = (
+    "share_url",
+    "pwd",
+    "save_dir",
+    "regex_pattern",
+    "regex_replace",
+    "folder_filter",
+    "exclude_folder_filter",
+)
 _SHARE_URL_PATTERN = re.compile(r"https://pan\.baidu\.com/s/[A-Za-z0-9_-]+")
 _PWD_INLINE_PATTERN = re.compile(
     r"(?:\bpwd\b|密码|提取码)[:：]?\s*([A-Za-z0-9]{4})", re.IGNORECASE
 )
+
+
+def build_retry_share_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: config[key]
+        for key in RETRY_SHARE_CONFIG_KEYS
+        if key in config and config[key] is not None
+    }
+
+
+def retry_share_config_key(config: Dict[str, Any]) -> str:
+    return json.dumps(
+        build_retry_share_config(config),
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
 
 
 def resolve_config_path(config_path: Union[Path, str] = "config.json") -> Path:

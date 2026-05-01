@@ -703,7 +703,7 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.storage._scan_local_files_dict = Mock(return_value={})
         transfer_list = [(1, "/save", "a.txt", "a.txt", False)]
         self.storage._ensure_transfer_dirs = Mock(return_value=None)
-        self.storage._execute_transfer_plan = Mock(return_value=(1, transfer_list))
+        self.storage._execute_transfer_plan = Mock(return_value=(1, transfer_list, []))
         rename_result = {
             "transferred_files": ["a.txt"],
             "rename_failed_files": [],
@@ -730,6 +730,7 @@ class BaiduStorageFlowTests(unittest.TestCase):
                 "completed_count": 1,
             },
             None,
+            [],
         )
 
     def test_transfer_share_streams_transfer_before_scan_finishes(self):
@@ -1312,6 +1313,27 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.assertEqual("boom", result["error"])
         self.storage._load_share_files.assert_not_called()
 
+    def test_transfer_share_falls_back_when_unknown_fast_path_error_created_target(self):
+        shared_dir = SimpleNamespace(is_dir=True, fs_id=10, path="/share/course")
+        entry_context = {
+            "shared_paths": [shared_dir],
+            "uk": 1,
+            "share_id": 2,
+            "bdstoken": "token",
+        }
+        self.storage._normalize_save_dir = Mock(return_value="/save")
+        self.storage._load_share_entries = Mock(return_value=entry_context)
+        self.storage._load_share_files = Mock()
+        self.storage.path_service.ensure_dir_exists.return_value = True
+        self.storage.client.list.side_effect = [[], [SimpleNamespace(path="/save/course")]]
+        self.storage.client.transfer_shared_paths.side_effect = RuntimeError("boom")
+
+        result = self.storage.transfer_share("url", save_dir="/save")
+
+        self.assertTrue(result["skipped"])
+        self.storage._load_share_files.assert_not_called()
+        self.storage.share_service.iter_shared_files.assert_called_once()
+
     def test_transfer_share_falls_back_when_target_folder_exists(self):
         shared_dir = SimpleNamespace(is_dir=True, fs_id=10, path="/share/course")
         entry_context = {
@@ -1516,6 +1538,30 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.assertEqual(1, result["rename_failed_count"])
         self.assertEqual("old/a.txt", result["rename_failed_files"][0]["source_path"])
 
+    def test_transfer_multiple_shares_collects_transfer_failed_details(self):
+        self.storage._process_single_share_config = Mock(
+            return_value={
+                "index": 1,
+                "share_url": "https://pan.baidu.com/s/***",
+                "save_dir": "/a",
+                "success": False,
+                "partial": True,
+                "message": "部分成功",
+                "transfer_failed_files": [
+                    {"fs_id": 1, "clean_path": "a.txt", "final_path": "a.txt", "error": "boom"}
+                ],
+                "transfer_failed_count": 1,
+                "retry_config": {"share_url": "https://pan.baidu.com/s/abc", "save_dir": "/a"},
+            }
+        )
+
+        result = self.storage.transfer_multiple_shares([{"share_url": "https://pan.baidu.com/s/abc"}])
+
+        self.assertTrue(result["partial"])
+        self.assertEqual(1, result["transfer_failed_count"])
+        self.assertEqual("a.txt", result["transfer_failed_files"][0]["clean_path"])
+        self.assertEqual("/a", result["transfer_failed_files"][0]["save_dir"])
+
     def test_build_transfer_list_skips_rename_candidate_when_source_exists_to_avoid_duplicate_copy(self):
         self.storage.path_service.normalize_path.side_effect = lambda path, file_only=False: path.strip("/")
         progress_callback = Mock()
@@ -1576,12 +1622,13 @@ class BaiduStorageFlowTests(unittest.TestCase):
         ]
 
         with patch("storage.time.sleep") as sleep:
-            success_count, successful_items = self.storage._execute_transfer_plan(
+            success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
                 transfer_list, "url", 1, 2, "token", "/save"
             )
 
         self.assertEqual(2, success_count)
         self.assertEqual(transfer_list, successful_items)
+        self.assertEqual([], failed_items)
         sleep.assert_called_once_with(FREQUENCY_LIMIT_DELAY)
 
     def test_execute_transfer_plan_splits_fs_ids_by_batch_size(self):
@@ -1591,17 +1638,113 @@ class BaiduStorageFlowTests(unittest.TestCase):
         ]
 
         with patch("storage.time.sleep"):
-            success_count, successful_items = self.storage._execute_transfer_plan(
+            success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
                 transfer_list, "url", 1, 2, "token", "/save"
             )
 
         calls = self.storage.client.transfer_shared_paths.call_args_list
         self.assertEqual(len(transfer_list), success_count)
         self.assertEqual(transfer_list, successful_items)
+        self.assertEqual([], failed_items)
         self.assertEqual(3, len(calls))
         self.assertEqual(TRANSFER_BATCH_SIZE, len(calls[0].kwargs["fs_ids"]))
         self.assertEqual(TRANSFER_BATCH_SIZE, len(calls[1].kwargs["fs_ids"]))
         self.assertEqual(1, len(calls[2].kwargs["fs_ids"]))
+
+    def test_execute_transfer_plan_retries_failed_items_only(self):
+        self.storage.path_service.normalize_path.side_effect = lambda path, **kwargs: path
+        transfer_list = [
+            (1, "/save/a", "a/1.txt", "a/1.txt", False),
+            (2, "/save/b", "b/2.txt", "b/2.txt", False),
+        ]
+        self.storage.client.transfer_shared_paths.side_effect = [
+            None,
+            RuntimeError("boom"),
+            None,
+        ]
+        self.storage._split_existing_transfer_items = Mock(
+            return_value=([], [transfer_list[1]])
+        )
+
+        with patch("storage.time.sleep"):
+            success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
+                transfer_list, "url", 1, 2, "token", "/save"
+            )
+
+        calls = self.storage.client.transfer_shared_paths.call_args_list
+        self.assertEqual(2, success_count)
+        self.assertEqual(transfer_list, successful_items)
+        self.assertEqual([], failed_items)
+        self.assertEqual([1], calls[0].kwargs["fs_ids"])
+        self.assertEqual([2], calls[1].kwargs["fs_ids"])
+        self.assertEqual([2], calls[2].kwargs["fs_ids"])
+
+    def test_execute_transfer_plan_returns_failed_file_after_retries(self):
+        self.storage.path_service.normalize_path.side_effect = lambda path, **kwargs: path
+        transfer_item = (1, "/save", "a.txt", "a.txt", False)
+        self.storage.client.transfer_shared_paths.side_effect = RuntimeError(
+            "error_code: 31066"
+        )
+        self.storage._split_existing_transfer_items = Mock(
+            return_value=([], [transfer_item])
+        )
+
+        with patch("storage.TRANSFER_FAILED_RETRY_ATTEMPTS", 1), patch("storage.time.sleep"):
+            success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
+                [transfer_item], "url", 1, 2, "token", "/save"
+            )
+
+        self.assertEqual(0, success_count)
+        self.assertEqual([], successful_items)
+        self.assertEqual(1, len(failed_items))
+        self.assertEqual("a.txt", failed_items[0]["clean_path"])
+        self.assertEqual("31066", failed_items[0]["error_code"])
+        self.assertEqual(2, failed_items[0]["attempts"])
+
+    def test_execute_transfer_plan_clears_failed_record_when_retry_finds_final_path(self):
+        self.storage.path_service.normalize_path.side_effect = lambda path, **kwargs: path
+        transfer_item = (1, "/save", "old.txt", "done.txt", True)
+        completed_item = (1, "/save", "done.txt", "done.txt", False)
+        self.storage.client.transfer_shared_paths.side_effect = [
+            RuntimeError("boom"),
+            RuntimeError("boom"),
+        ]
+        self.storage._split_existing_transfer_items = Mock(
+            side_effect=[([], [transfer_item]), ([completed_item], [])]
+        )
+
+        with patch("storage.TRANSFER_FAILED_RETRY_ATTEMPTS", 1), patch("storage.time.sleep"):
+            success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
+                [transfer_item], "url", 1, 2, "token", "/save"
+            )
+
+        self.assertEqual(1, success_count)
+        self.assertEqual([completed_item], successful_items)
+        self.assertEqual([], failed_items)
+
+    def test_split_existing_transfer_items_counts_already_transferred_files(self):
+        self.storage.path_service.normalize_path.side_effect = lambda path, **kwargs: path
+        items = [
+            (1, "/save", "a.txt", "a.txt", False),
+            (2, "/save", "old.txt", "done.txt", True),
+            (3, "/save", "missing.txt", "missing.txt", False),
+        ]
+        self.storage._scan_local_files_dict = Mock(
+            return_value={"a.txt": None, "done.txt": None}
+        )
+
+        existing_items, missing_items = self.storage._split_existing_transfer_items(
+            items, "/save"
+        )
+
+        self.assertEqual(
+            [
+                (1, "/save", "a.txt", "a.txt", False),
+                (2, "/save", "done.txt", "done.txt", False),
+            ],
+            existing_items,
+        )
+        self.assertEqual([items[2]], missing_items)
 
     def test_rename_transferred_files_sleeps_only_between_renames(self):
         self.storage.path_service.ensure_dir_exists.return_value = True
@@ -1654,6 +1797,30 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.assertEqual(1, result["rename_failed_count"])
         self.assertIn("重命名失败", result["message"])
 
+    def test_build_transfer_result_includes_transfer_failed_files(self):
+        failed_files = [
+            {"fs_id": 2, "clean_path": "b.txt", "final_path": "b.txt", "error": "boom"}
+        ]
+
+        result = self.storage._build_transfer_result(
+            1,
+            2,
+            {
+                "transferred_files": ["a.txt"],
+                "rename_failed_files": [],
+                "rename_failed_count": 0,
+                "completed_count": 1,
+            },
+            None,
+            failed_files,
+        )
+
+        self.assertFalse(result["success"])
+        self.assertTrue(result["partial"])
+        self.assertEqual(1, result["transfer_failed_count"])
+        self.assertEqual(failed_files, result["transfer_failed_files"])
+        self.assertIn("转存失败", result["message"])
+
     def test_build_transfer_result_treats_transfer_success_with_all_rename_failures_as_partial(self):
         result = self.storage._build_transfer_result(
             2,
@@ -1694,6 +1861,8 @@ class BaiduStorageFlowTests(unittest.TestCase):
                 "success": False,
                 "partial": False,
                 "error": "转存失败，没有文件成功转存",
+                "transfer_failed_files": [],
+                "transfer_failed_count": 0,
                 "rename_failed_files": [],
                 "rename_failed_count": 0,
                 "completed_count": 0,

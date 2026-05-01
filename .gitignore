@@ -61,4 +61,8 @@ test_*.py
 transfer_runner_local.py
 share_urls.txt
 config.txt
+config.json.bak-*
+.gitignore.bak-*
+.transfershare_failed_transfers.json
+.transfershare_failed_transfers.json.tmp
 .omc/
