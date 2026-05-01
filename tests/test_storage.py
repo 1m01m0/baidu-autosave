@@ -770,6 +770,40 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.assertEqual(2, self.storage.client.transfer_shared_paths.call_count)
         self.storage._load_share_files.assert_not_called()
 
+    def test_transfer_share_streaming_batches_transfer_items_across_scan_batches(self):
+        self.storage._normalize_save_dir = Mock(return_value="/save")
+        entry_context = {
+            "shared_paths": [Mock(is_dir=False)],
+            "uk": 1,
+            "share_id": 2,
+            "bdstoken": "token",
+        }
+        self.storage._load_share_entries = Mock(return_value=entry_context)
+        self.storage.share_service.iter_shared_files.return_value = [
+            {"fs_id": 1, "path": "1.mp4"},
+            {"fs_id": 2, "path": "2.txt"},
+            {"fs_id": 3, "path": "3.mp4"},
+            {"fs_id": 4, "path": "4.txt"},
+        ]
+        self.storage._scan_local_files_dict = Mock(return_value={})
+        self.storage.path_service.ensure_dir_exists.return_value = True
+
+        with patch("storage.TRANSFER_BATCH_SIZE", 2):
+            result = self.storage.transfer_share(
+                "https://pan.baidu.com/s/abc",
+                regex_pattern=r"\.mp4$",
+            )
+
+        self.assertTrue(result["success"])
+        self.storage.client.transfer_shared_paths.assert_called_once_with(
+            remotedir="/save",
+            fs_ids=[1, 3],
+            uk=1,
+            share_id=2,
+            bdstoken="token",
+            shared_url="https://pan.baidu.com/s/abc",
+        )
+
     def test_transfer_share_streaming_preserves_regex_rename(self):
         self.storage._normalize_save_dir = Mock(return_value="/save")
         entry_context = {

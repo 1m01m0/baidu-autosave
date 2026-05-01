@@ -1551,13 +1551,42 @@ class BaiduStorage:
         scanned_relative_dirs = set()
         local_files_dict = {}
         shared_file_batch = []
+        transfer_item_buffer = []
         total_transfer_count = 0
         transfer_success_count = 0
         successful_transfer_items = []
         dir_error = None
 
-        def flush_shared_file_batch():
+        def flush_transfer_item_buffer(force=False):
             nonlocal total_transfer_count, transfer_success_count, dir_error
+            if not transfer_item_buffer:
+                return None
+            if not force and len(transfer_item_buffer) < TRANSFER_BATCH_SIZE:
+                return None
+
+            flush_count = len(transfer_item_buffer) if force else TRANSFER_BATCH_SIZE
+            transfer_list = transfer_item_buffer[:flush_count]
+            del transfer_item_buffer[:flush_count]
+
+            dir_error = self._ensure_transfer_dirs(transfer_list)
+            if dir_error:
+                return dir_error
+
+            success_count, successful_items = self._execute_transfer_plan(
+                transfer_list,
+                share_url,
+                context["uk"],
+                context["share_id"],
+                context["bdstoken"],
+                transfer_target_dir,
+                progress_callback,
+            )
+            total_transfer_count += len(transfer_list)
+            transfer_success_count += success_count
+            successful_transfer_items.extend(successful_items)
+            return None
+
+        def flush_shared_file_batch():
             if not shared_file_batch:
                 return None
 
@@ -1583,25 +1612,11 @@ class BaiduStorage:
             transfer_list = self._filter_transfer_candidates_core(
                 candidates, local_files_dict, summary, warning_samples
             )
-            if not transfer_list:
-                return None
-
-            dir_error = self._ensure_transfer_dirs(transfer_list)
-            if dir_error:
-                return dir_error
-
-            success_count, successful_items = self._execute_transfer_plan(
-                transfer_list,
-                share_url,
-                context["uk"],
-                context["share_id"],
-                context["bdstoken"],
-                transfer_target_dir,
-                progress_callback,
-            )
-            total_transfer_count += len(transfer_list)
-            transfer_success_count += success_count
-            successful_transfer_items.extend(successful_items)
+            transfer_item_buffer.extend(transfer_list)
+            while len(transfer_item_buffer) >= TRANSFER_BATCH_SIZE:
+                buffer_error = flush_transfer_item_buffer()
+                if buffer_error:
+                    return buffer_error
             return None
 
         try:
@@ -1617,6 +1632,8 @@ class BaiduStorage:
 
             if not dir_error:
                 dir_error = flush_shared_file_batch()
+            if not dir_error:
+                dir_error = flush_transfer_item_buffer(force=True)
         finally:
             stop_event.set()
             producer_thread.join()
