@@ -133,11 +133,13 @@ class SharedPathService:
             is_dir = shared_file.get("is_dir") or shared_file.get("isdir") == 1
             is_file = shared_file.get("is_file") or shared_file.get("isdir") == 0
             fs_id = shared_file.get("fs_id", "")
+            md5 = shared_file.get("md5")
         else:
             path = getattr(shared_file, "path", "")
             is_dir = getattr(shared_file, "is_dir", False)
             is_file = getattr(shared_file, "is_file", not is_dir)
             fs_id = getattr(shared_file, "fs_id", "")
+            md5 = getattr(shared_file, "md5", None)
 
         name = os.path.basename(str(path).rstrip("/"))
         return {
@@ -147,6 +149,7 @@ class SharedPathService:
             "name": name,
             "is_dir": bool(is_dir),
             "is_file": bool(is_file),
+            "md5": md5,
         }
 
     def _iter_shared_dir_pages(self, dir_path, uk, share_id, bdstoken):

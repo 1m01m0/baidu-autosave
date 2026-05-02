@@ -17,6 +17,7 @@ from storage_client import BaiduClientAdapter
 from storage_errors import (
     classify_storage_error,
     is_rate_limit_error,
+    is_storage_temporary_error_info,
     is_transfer_count_limit_error,
     parse_share_error,
 )
@@ -67,6 +68,13 @@ TRANSFER_FAILED_RETRY_ATTEMPTS = _read_positive_int_env(
 TRANSFER_FAILED_RETRY_DELAY = _read_non_negative_float_env(
     "TRANSFERSHARE_TRANSFER_FAILED_RETRY_DELAY", 5
 )
+
+
+class TransferItem(tuple):
+    def __new__(cls, fs_id, dir_path, clean_path, final_path, need_rename, src_md5=None):
+        obj = super().__new__(cls, (fs_id, dir_path, clean_path, final_path, need_rename))
+        obj.src_md5 = src_md5
+        return obj
 
 
 class BaiduStorage:
@@ -681,9 +689,23 @@ class BaiduStorage:
 
         logger = get_logger()
         if dup_names:
+            dup_name_set = set(dup_names)
+            paths_by_name = {name: [] for name in dup_names}
+            for file_info, file_name in zip(local_files, file_names):
+                if file_name not in dup_name_set:
+                    continue
+                relative_path = str(file_info.get("relative_path") or "").lstrip("/")
+                full_path = self.path_service.normalize_path(
+                    posixpath.join(save_dir, relative_path)
+                )
+                paths_by_name[file_name].append(full_path)
+
             logger.info(f"检测到 {len(dup_names)} 个重复文件名：")
             for name in dup_names:
-                logger.info(f"  - {name} 出现 {name_counts[name]} 次")
+                duplicate_paths = paths_by_name[name]
+                logger.info(f"  - {name} 出现 {len(duplicate_paths)} 次")
+                for path in duplicate_paths:
+                    logger.info(f"    {path}")
         else:
             logger.info("没有发现重复文件名。")
 
@@ -697,6 +719,16 @@ class BaiduStorage:
     def _add_warning_sample(warning_samples, message, max_samples=5):
         if len(warning_samples) < max_samples:
             warning_samples.append(message)
+
+    @staticmethod
+    def _is_verified_same_file(src_md5, local_md5):
+        return bool(src_md5 and local_md5 and src_md5 == local_md5)
+
+    @staticmethod
+    def _existing_conflict_message(path, src_md5, local_md5, prefix):
+        if src_md5 and local_md5:
+            return f"{prefix}已存在,但内容不同(md5不同),跳过： {path}"
+        return f"{prefix}已存在,但缺少MD5无法确认是否相同,跳过： {path}"
 
     def _filter_transfer_candidates_core(
         self,
@@ -720,36 +752,38 @@ class BaiduStorage:
             if not need_rename:
                 if source_exists:
                     summary["existing_count"] += 1
-                    if src_md5:
-                        if source_md5 == src_md5 or source_md5 is None:
-                            continue
-                        summary["conflict_count"] += 1
-                        self._add_warning_sample(
-                            warning_samples,
-                            f"同路径已存在,但内容不同(md5不同),跳过： {final_path}",
-                        )
+                    if self._is_verified_same_file(src_md5, source_md5):
                         continue
+                    summary["conflict_count"] += 1
+                    self._add_warning_sample(
+                        warning_samples,
+                        self._existing_conflict_message(
+                            final_path, src_md5, source_md5, "同路径"
+                        ),
+                    )
                     continue
             elif target_exists:
                 summary["existing_count"] += 1
-                if src_md5 and target_md5 == src_md5:
-                    continue
-                if src_md5 and target_md5 is None:
+                if self._is_verified_same_file(src_md5, target_md5):
                     continue
                 summary["conflict_count"] += 1
                 self._add_warning_sample(
                     warning_samples,
-                    f"重命名目标已存在，跳过转存: {final_path}",
+                    self._existing_conflict_message(
+                        final_path, src_md5, target_md5, "重命名目标"
+                    ),
                 )
                 continue
             elif source_exists:
                 summary["existing_count"] += 1
-                if src_md5 and source_md5 == src_md5:
+                if self._is_verified_same_file(src_md5, source_md5):
                     continue
                 summary["conflict_count"] += 1
                 self._add_warning_sample(
                     warning_samples,
-                    f"源路径已存在，跳过重复转存以避免副本: {clean_path} -> {final_path}",
+                    self._existing_conflict_message(
+                        clean_path, src_md5, source_md5, "源路径"
+                    ),
                 )
                 continue
 
@@ -757,12 +791,13 @@ class BaiduStorage:
                 continue
 
             transfer_list.append(
-                (
+                TransferItem(
                     candidate["fs_id"],
                     candidate["dir_path"],
                     clean_path,
                     final_path,
                     need_rename,
+                    src_md5,
                 )
             )
             summary["transfer_needed_count"] += 1
@@ -901,14 +936,33 @@ class BaiduStorage:
         missing_items = []
         for item in items:
             fs_id, dir_path, clean_path, final_path, need_rename = item
-            clean_normalized = self.path_service.normalize_path(str(clean_path or "").lstrip("/"))
-            final_normalized = self.path_service.normalize_path(str(final_path or "").lstrip("/"))
-            clean_exists = clean_normalized in local_files_dict
-            final_exists = final_normalized in local_files_dict
+            src_md5 = getattr(item, "src_md5", None)
+            if not src_md5:
+                missing_items.append(item)
+                continue
 
-            if need_rename and final_exists:
-                existing_items.append((fs_id, dir_path, final_path, final_path, False))
-            elif clean_exists or (not need_rename and final_exists):
+            clean_normalized = self.path_service.normalize_path(
+                str(clean_path or "").lstrip("/")
+            )
+            final_normalized = (
+                self.path_service.normalize_path(str(final_path or "").lstrip("/"))
+                if need_rename
+                else clean_normalized
+            )
+            clean_md5 = local_files_dict.get(clean_normalized)
+            final_md5 = (
+                clean_md5
+                if final_normalized == clean_normalized
+                else local_files_dict.get(final_normalized)
+            )
+            clean_verified = clean_md5 == src_md5
+            final_verified = final_md5 == src_md5
+
+            if need_rename and final_verified:
+                existing_items.append(
+                    TransferItem(fs_id, dir_path, final_path, final_path, False, src_md5)
+                )
+            elif clean_verified or (not need_rename and final_verified):
                 existing_items.append(item)
             else:
                 missing_items.append(item)
@@ -1024,7 +1078,7 @@ class BaiduStorage:
 
         try:
             while pending_items and attempt <= max_attempt:
-                batch_size = 1 if attempt == max_attempt and attempt > 1 else current_batch_size
+                batch_size = current_batch_size
                 grouped_transfer_entries = build_entries(pending_items, batch_size)
                 next_pending = {}
                 reduced_batch_size = batch_size
@@ -1095,41 +1149,6 @@ class BaiduStorage:
                                 mark_local_files_cache_dirty()
                                 final_error = retry_e
 
-                        if final_error is not None and len(batch_items) > 1:
-                            error_info = classify_storage_error(final_error)
-                            if error_info.retryable:
-                                next_size = reduce_transfer_batch_size(len(batch_items))
-                                reduced_batch_size = min(reduced_batch_size, next_size)
-                                if progress_callback:
-                                    progress_callback(
-                                        "warning",
-                                        f"转存响应临时异常，降低批量到 {next_size} 后重试: "
-                                        f"{dir_path} ({len(batch_items)} 个文件)",
-                                    )
-                                force_refresh = local_files_cache_dirty
-                                existing_items, missing_items = self._split_existing_transfer_items(
-                                    batch_items,
-                                    target_dir,
-                                    progress_callback,
-                                    scan_cache,
-                                    force_refresh=force_refresh,
-                                )
-                                if force_refresh:
-                                    local_files_cache_dirty = False
-                                add_successful_items(existing_items)
-                                for item in missing_items:
-                                    key = self._transfer_item_key(item)
-                                    if key not in successful_keys:
-                                        next_pending[key] = item
-                                for _, _, remaining_items in grouped_transfer_entries[index + 1 :]:
-                                    for item in remaining_items:
-                                        key = self._transfer_item_key(item)
-                                        if key not in successful_keys:
-                                            next_pending[key] = item
-                                batch_size_reduced = True
-                                final_error = None
-                                break
-
                         if final_error is not None:
                             error_info = classify_storage_error(final_error)
                             error_msg = f"转存失败: {dir_path} - {error_info.message}"
@@ -1156,7 +1175,9 @@ class BaiduStorage:
                             )
                             if force_refresh:
                                 local_files_cache_dirty = False
-                            missing_keys = {self._transfer_item_key(item) for item in missing_items}
+                            missing_keys = {
+                                self._transfer_item_key(item) for item in missing_items
+                            }
                             for item in batch_items:
                                 if self._transfer_item_key(item) not in missing_keys:
                                     failed_records.pop(self._transfer_item_key(item), None)
@@ -1165,11 +1186,15 @@ class BaiduStorage:
                                 key = self._transfer_item_key(item)
                                 if key in successful_keys:
                                     continue
-                                next_pending[key] = item
-                                regular_retry_needed = True
                                 failed_records[key] = self._build_transfer_failed_record(
                                     item, target_dir, error_info, attempt
                                 )
+                                if (
+                                    error_info.retryable
+                                    and not is_storage_temporary_error_info(error_info)
+                                ):
+                                    next_pending[key] = item
+                                    regular_retry_needed = True
 
                 pending_items = list(next_pending.values())
                 if batch_size_reduced:
@@ -1548,7 +1573,14 @@ class BaiduStorage:
             child_count += 1
             if child.get("is_file") and child.get("fs_id"):
                 file_transfer_list.append(
-                    (child["fs_id"], target_dir, child["name"], child["name"], False)
+                    TransferItem(
+                        child["fs_id"],
+                        target_dir,
+                        child["name"],
+                        child["name"],
+                        False,
+                        child.get("md5"),
+                    )
                 )
                 if len(file_transfer_list) >= TRANSFER_BATCH_SIZE:
                     self._flush_dir_tree_file_batch(

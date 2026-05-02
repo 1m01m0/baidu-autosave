@@ -43,6 +43,12 @@ def error_to_text(error: ErrorLike) -> str:
     return str(error)
 
 
+def _is_storage_temporary_message(raw_message: str, lowered: str) -> bool:
+    return "存储好像出问题了" in raw_message or (
+        "storage" in lowered and "try again" in lowered
+    )
+
+
 def _match_error_code(text: str) -> Optional[str]:
     patterns = (
         r"error_code:\s*(-?\d+)",
@@ -75,15 +81,6 @@ def classify_storage_error(error: ErrorLike) -> StorageErrorInfo:
             retryable=True,
         )
 
-    if any(keyword in lowered for keyword in _NETWORK_KEYWORDS):
-        return StorageErrorInfo(
-            kind="network",
-            message="网络请求失败，请检查网络连接或稍后重试",
-            raw_message=raw_message,
-            code=code,
-            retryable=True,
-        )
-
     if code == "-65":
         return StorageErrorInfo(
             kind="rate_limit",
@@ -93,14 +90,19 @@ def classify_storage_error(error: ErrorLike) -> StorageErrorInfo:
             retryable=True,
         )
 
-    if code == "4" and (
-        "存储好像出问题了" in raw_message
-        or "稍候再试" in raw_message
-        or "try again" in lowered
-    ):
+    if code == "4" and _is_storage_temporary_message(raw_message, lowered):
         return StorageErrorInfo(
             kind="network",
-            message="网盘存储临时异常，请稍后重试",
+            message=f"网盘存储临时异常，请稍后重试：{raw_message}",
+            raw_message=raw_message,
+            code=code,
+            retryable=True,
+        )
+
+    if code == "4" and any(keyword in lowered for keyword in _NETWORK_KEYWORDS):
+        return StorageErrorInfo(
+            kind="network",
+            message="网络请求失败，请检查网络连接或稍后重试",
             raw_message=raw_message,
             code=code,
             retryable=True,
@@ -186,6 +188,15 @@ def classify_storage_error(error: ErrorLike) -> StorageErrorInfo:
             code=code,
         )
 
+    if any(keyword in lowered for keyword in _NETWORK_KEYWORDS):
+        return StorageErrorInfo(
+            kind="network",
+            message="网络请求失败，请检查网络连接或稍后重试",
+            raw_message=raw_message,
+            code=code,
+            retryable=True,
+        )
+
     if code is not None:
         return StorageErrorInfo(
             kind="error_code",
@@ -226,6 +237,16 @@ def is_retry_abort_error(error: ErrorLike) -> bool:
     return classify_storage_error(error).kind == "retry_abort"
 
 
+def is_storage_temporary_error_info(error_info: StorageErrorInfo) -> bool:
+    return (
+        error_info.code == "4"
+        and error_info.retryable
+        and _is_storage_temporary_message(
+            error_info.raw_message, error_info.raw_message.lower()
+        )
+    )
+
+
 def is_transfer_count_limit_error(error: ErrorLike) -> bool:
     error_info = classify_storage_error(error)
     raw_message = error_info.raw_message.lower()
@@ -234,7 +255,8 @@ def is_transfer_count_limit_error(error: ErrorLike) -> bool:
         "一次支持操作999个",
         "share transfer pcs error",
         "more items",
-        "too many",
+        "too many files",
+        "too many items",
     )
     if error_info.code in {"-33", "120", "130"}:
         return True
