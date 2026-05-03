@@ -50,9 +50,14 @@ class WeChatNotifier:
             error: 异常对象
             attempt: 当前尝试次数
         """
-        print(f"发送企业微信通知时出错: {str(error)}")
-        print("错误堆栈信息:")
-        traceback.print_exc()
+        from utils import mask_sensitive
+
+        error_text = mask_sensitive(str(error)) or type(error).__name__
+        stack_text = mask_sensitive(traceback.format_exc()) or ""
+        print(f"发送企业微信通知时出错: {type(error).__name__}: {error_text}")
+        if stack_text:
+            print("错误堆栈信息:")
+            print(stack_text)
 
         # 使用现有的错误处理工具（在函数内部导入以避免循环导入）
         try:
@@ -78,7 +83,8 @@ class WeChatNotifier:
         """
         for attempt in range(MAX_RETRIES + 1):
             try:
-                data = self._build_message_data(message, msg_type)
+                masked_message = self._mask_sensitive(message) or message
+                data = self._build_message_data(masked_message, msg_type)
                 response = requests.post(
                     self.webhook_url,
                     json=data,
@@ -279,7 +285,7 @@ class WeChatNotifier:
         if text is None:
             return text
 
-        from utils import _mask_sensitive as shared_mask_sensitive
+        from utils import mask_sensitive as shared_mask_sensitive
 
         masked = shared_mask_sensitive(text)
         return masked if masked is not None else text

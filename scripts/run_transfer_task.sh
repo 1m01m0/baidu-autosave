@@ -12,7 +12,7 @@ cd "$REPO_ROOT"
 
 if [[ "${1:-}" == "--show-network-info" ]]; then
   echo "网络环境信息:"
-  curl -s https://ipinfo.io/json || echo "无法获取IP信息"
+  curl --fail --show-error --silent --connect-timeout 5 --max-time 10 https://ipinfo.io/json || echo "无法获取IP信息"
   echo "========================================"
 fi
 

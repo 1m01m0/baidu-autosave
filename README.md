@@ -163,10 +163,10 @@ python save_baidu_cookies.py --headless
   - `save_dir` 或 `SAVE_DIR`：保存目录，默认 `/AutoTransfer`
   - `wechat_webhook` 或 `WECHAT_WEBHOOK`：企业微信机器人 Webhook，可选
 - 统一加载规则：
-  - 本地配置优先，环境变量作为回退
+  - 本地配置优先；仅当 `config.json` 不存在时才回退到环境变量
   - `share_urls` 为字符串时，支持逗号或换行分隔，程序会统一归一化
-  - `share_urls` 为对象数组时，会保留每个链接自己的 `save_dir`、`folder_filter`、`regex_pattern`、`regex_replace`
-  - 顶层 `folder_filter`、`regex_pattern`、`regex_replace` 会作为默认值应用到未单独配置的链接
+  - `share_urls` 为对象数组时，会保留每个链接自己的 `save_dir`、`folder_filter`、`exclude_folder_filter`、`regex_pattern`、`regex_replace`
+  - 顶层 `folder_filter`、`exclude_folder_filter`、`regex_pattern`、`regex_replace` 会作为默认值应用到未单独配置的链接
 
 **示例 1：简单配置**
 ```json
@@ -212,6 +212,7 @@ python save_baidu_cookies.py --headless
       "share_url": "https://pan.baidu.com/s/yyyyyy?pwd=efgh",
       "save_dir": "/视频",
       "folder_filter": ["^课程", ".*资料.*"],
+      "exclude_folder_filter": "预告|花絮",
       "regex_pattern": ".*课程(\\d+).*\\.mp4$",
       "regex_replace": "第\\1课.mp4"
     }
@@ -248,18 +249,20 @@ python save_baidu_cookies.py --headless
 - `share_urls` 为字符串时，支持用逗号或换行分隔，程序会自动归一化为按行处理
 - `share_urls` 为数组时，每个元素可以是字符串或对象
 - **全局高级参数**（推荐简化配置）：
-  - 在顶层设置 `folder_filter`、`regex_pattern`、`regex_replace`，会自动应用到所有链接
+  - 在顶层设置 `folder_filter`、`exclude_folder_filter`、`regex_pattern`、`regex_replace`，会自动应用到所有链接
   - 如果某个链接单独指定了这些参数，则以链接的配置为准（覆盖全局设置）
 - **对象格式支持**：
   - `share_url`：分享链接（必需）
   - `pwd`：提取码（可选）
   - `save_dir`：保存目录（可选）
   - `folder_filter`：文件夹过滤规则（可选，正则表达式或列表，覆盖全局设置）
+  - `exclude_folder_filter`：排除文件夹规则（可选，正则表达式或列表，覆盖全局设置）
   - `regex_pattern`：文件正则表达式（可选，用于文件过滤和重命名，覆盖全局设置）
   - `regex_replace`：文件正则替换（可选，覆盖全局设置）
 - 保存目录不存在时会自动创建
 - `folder_filter`：只转存匹配的文件夹及其内容
-- `regex_pattern` 和 `regex_replace`：用于文件过滤和重命名
+- `exclude_folder_filter`：跳过匹配的文件夹及其内容
+- `regex_pattern` 和 `regex_replace`：用于文件过滤和重命名；替换分组使用 Python `re.sub()` 语法（如 `\\1`、`\\2`）
 
 
 ### 必需配置
@@ -289,7 +292,7 @@ https://pan.baidu.com/s/1example3?pwd=abcd /我的文件/资料
 
 ### 自动执行
 
-工作流会每六小时自动运行一次（UTC 时间的 0、6、12、18 点）。
+工作流会每六小时自动运行一次（UTC 时间的 0:17、6:17、12:17、18:17）。
 
 ### 手动执行
 

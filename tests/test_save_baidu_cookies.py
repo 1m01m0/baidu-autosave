@@ -10,6 +10,8 @@ from save_baidu_cookies import (
     find_cookie,
     load_config,
     read_env_values,
+    set_secret,
+    write_env_file,
 )
 
 
@@ -119,6 +121,32 @@ class SaveBaiduCookiesTests(unittest.TestCase):
                     read_env_values(env_path)
 
         self.assertEqual(1, cm.exception.code)
+
+    def test_set_secret_passes_secret_via_stdin_not_argv(self):
+        secret = "BDUSS=secret; STOKEN=token"
+
+        with patch("save_baidu_cookies.subprocess.run") as run:
+            set_secret("owner/repo", "BAIDU_COOKIES", secret)
+
+        run.assert_called_once()
+        args, kwargs = run.call_args
+        self.assertNotIn(secret, args[0])
+        self.assertNotIn("--body", args[0])
+        self.assertEqual(secret, kwargs["input"])
+        self.assertTrue(kwargs["text"])
+        self.assertTrue(kwargs["capture_output"])
+
+    def test_write_env_file_sets_private_permissions(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_path = Path(temp_dir) / "baidu_cookies.env"
+
+            write_env_file(env_path, "BDUSS=foo; STOKEN=bar", "BDUSS=foo; STOKEN=bar; PANWEB=baz")
+
+            self.assertEqual(0o600, env_path.stat().st_mode & 0o777)
+            content = env_path.read_text(encoding="utf-8")
+
+        self.assertIn('BAIDU_COOKIES="BDUSS=foo; STOKEN=bar"', content)
+        self.assertIn('BAIDU_COOKIES_FULL="BDUSS=foo; STOKEN=bar; PANWEB=baz"', content)
 
 
 if __name__ == "__main__":

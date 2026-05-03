@@ -68,6 +68,9 @@ TRANSFER_FAILED_RETRY_ATTEMPTS = _read_positive_int_env(
 TRANSFER_FAILED_RETRY_DELAY = _read_non_negative_float_env(
     "TRANSFERSHARE_TRANSFER_FAILED_RETRY_DELAY", 5
 )
+STREAM_PRODUCER_JOIN_TIMEOUT = _read_non_negative_float_env(
+    "TRANSFERSHARE_STREAM_PRODUCER_JOIN_TIMEOUT", 5
+)
 
 
 class TransferItem(tuple):
@@ -1049,6 +1052,16 @@ class BaiduStorage:
                     return candidate
             return 1
 
+        def add_pending_items(next_pending, items):
+            for item in items:
+                key = self._transfer_item_key(item)
+                if key not in successful_keys:
+                    next_pending[key] = item
+
+        def add_remaining_entries(next_pending, entries):
+            for _, _, remaining_items in entries:
+                add_pending_items(next_pending, remaining_items)
+
         successful_transfer_items = []
         successful_keys = set()
         failed_records = {}
@@ -1084,6 +1097,7 @@ class BaiduStorage:
                 reduced_batch_size = batch_size
                 batch_size_reduced = False
                 regular_retry_needed = False
+                stop_due_to_temporary_error = False
 
                 for index, (dir_path, fs_ids, batch_items) in enumerate(grouped_transfer_entries):
                     try:
@@ -1112,15 +1126,10 @@ class BaiduStorage:
                                     f"转存批次超量，降低批量到 {next_size} 后重试: "
                                     f"{dir_path} ({len(batch_items)} 个文件)",
                                 )
-                            for item in batch_items:
-                                key = self._transfer_item_key(item)
-                                if key not in successful_keys:
-                                    next_pending[key] = item
-                            for _, _, remaining_items in grouped_transfer_entries[index + 1 :]:
-                                for item in remaining_items:
-                                    key = self._transfer_item_key(item)
-                                    if key not in successful_keys:
-                                        next_pending[key] = item
+                            add_pending_items(next_pending, batch_items)
+                            add_remaining_entries(
+                                next_pending, grouped_transfer_entries[index + 1 :]
+                            )
                             batch_size_reduced = True
                             final_error = None
                             break
@@ -1182,6 +1191,23 @@ class BaiduStorage:
                                 if self._transfer_item_key(item) not in missing_keys:
                                     failed_records.pop(self._transfer_item_key(item), None)
                             add_successful_items(existing_items)
+                            is_temporary_error = is_storage_temporary_error_info(error_info)
+                            if error_info.retryable and not is_temporary_error and len(missing_items) > 1:
+                                next_size = reduce_transfer_batch_size(len(missing_items))
+                                reduced_batch_size = min(reduced_batch_size, next_size)
+                                if progress_callback:
+                                    progress_callback(
+                                        "warning",
+                                        f"转存批次失败，降低批量到 {next_size} 后隔离重试: "
+                                        f"{dir_path} ({len(missing_items)} 个文件)",
+                                    )
+                                add_pending_items(next_pending, missing_items)
+                                add_remaining_entries(
+                                    next_pending, grouped_transfer_entries[index + 1 :]
+                                )
+                                batch_size_reduced = True
+                                break
+
                             for item in missing_items:
                                 key = self._transfer_item_key(item)
                                 if key in successful_keys:
@@ -1189,14 +1215,23 @@ class BaiduStorage:
                                 failed_records[key] = self._build_transfer_failed_record(
                                     item, target_dir, error_info, attempt
                                 )
-                                if (
-                                    error_info.retryable
-                                    and not is_storage_temporary_error_info(error_info)
-                                ):
+                                if error_info.retryable and not is_temporary_error:
                                     next_pending[key] = item
                                     regular_retry_needed = True
 
-                pending_items = list(next_pending.values())
+                            if is_temporary_error:
+                                for _, _, remaining_items in grouped_transfer_entries[index + 1 :]:
+                                    for item in remaining_items:
+                                        key = self._transfer_item_key(item)
+                                        if key in successful_keys:
+                                            continue
+                                        failed_records[key] = self._build_transfer_failed_record(
+                                            item, target_dir, error_info, attempt
+                                        )
+                                stop_due_to_temporary_error = True
+                                break
+
+                pending_items = [] if stop_due_to_temporary_error else list(next_pending.values())
                 if batch_size_reduced:
                     current_batch_size = reduced_batch_size
                 if pending_items and regular_retry_needed and attempt < max_attempt:
@@ -1864,6 +1899,14 @@ class BaiduStorage:
 
             dir_error = self._ensure_transfer_dirs(transfer_list)
             if dir_error:
+                error_info = classify_storage_error(dir_error.get("error", "创建目录失败"))
+                transfer_failed_files.extend(
+                    self._build_transfer_failed_record(
+                        item, transfer_target_dir, error_info, 1
+                    )
+                    for item in transfer_list
+                )
+                total_transfer_count += len(transfer_list)
                 return dir_error
 
             success_count, successful_items, failed_items = self._execute_transfer_plan(
@@ -1931,7 +1974,9 @@ class BaiduStorage:
                 dir_error = flush_transfer_item_buffer(force=True)
         finally:
             stop_event.set()
-            producer_thread.join()
+            producer_thread.join(STREAM_PRODUCER_JOIN_TIMEOUT)
+            if producer_thread.is_alive():
+                get_logger().warning("共享文件扫描线程未及时退出，继续处理已完成结果")
 
         self._report_transfer_candidate_summary(
             summary, warning_samples, progress_callback
@@ -1959,6 +2004,8 @@ class BaiduStorage:
                     }
                 )
                 return result
+            dir_error["transfer_failed_files"] = transfer_failed_files
+            dir_error["transfer_failed_count"] = len(transfer_failed_files)
             return dir_error
 
         scan_error = producer_error.get("error")

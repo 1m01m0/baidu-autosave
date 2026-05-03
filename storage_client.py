@@ -200,13 +200,15 @@ class BaiduClientAdapter:
         return self._quota_info
 
     def list(self, path):
-        return self.client.list(path)
+        return self.call_with_retry(self.client.list, path, suppress_retry_abort=False)
 
     def makedir(self, path):
-        return self.client.makedir(path)
+        return self.call_with_retry(self.client.makedir, path, suppress_retry_abort=False)
 
     def rename(self, source, target):
-        return self.client.rename(source, target)
+        return self.call_with_retry(
+            self.client.rename, source, target, suppress_retry_abort=False
+        )
 
     def access_shared(self, share_url, pwd=None):
         return self.call_with_retry(self.client.access_shared, share_url, pwd)
@@ -218,6 +220,4 @@ class BaiduClientAdapter:
         return self.call_with_retry(self.client.list_shared_paths, *args, **kwargs)
 
     def transfer_shared_paths(self, **kwargs):
-        return self.call_with_retry(
-            self.client.transfer_shared_paths, suppress_retry_abort=False, **kwargs
-        )
+        return self.client.transfer_shared_paths(**kwargs)

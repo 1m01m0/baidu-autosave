@@ -290,14 +290,11 @@ def load_runtime_config(config_path: Union[Path, str] = "config.json") -> Dict[s
         config["config_source"] = "env"
         config["config_load_warning"] = str(exc)
 
-    share_data = normalize_share_urls_value(
-        config.get("share_urls"), config.get("save_dir")
-    )
-    config.update(share_data)
-    config["share_configs"] = apply_global_share_defaults(
-        share_data["share_configs"], config
-    )
-    config["share_count"] = len(config["share_configs"])
+    validation = validate_runtime_config(config)
+    if validation["errors"]:
+        raise ValueError("配置校验失败: " + "; ".join(validation["errors"]))
+
+    config = validation["config"]
     config["config_path"] = str(path)
     return config
 
@@ -316,32 +313,143 @@ def _validate_regex_filter_config(
     if isinstance(value, str):
         try:
             re.compile(value)
-        except re.error as exc:
+        except (re.error, TypeError) as exc:
             errors.append(f"❌ {label}错误: {exc}")
         else:
             info_messages.append(f"✅ {label}有效: {value}")
         return
 
     if isinstance(value, list):
+        has_error = False
         for idx, pattern in enumerate(value, 1):
             if not isinstance(pattern, str):
                 errors.append(
                     f"❌ 第 {idx} 个{label}类型错误，应为字符串，"
                     f"当前类型: {type(pattern).__name__}"
                 )
-                return
+                has_error = True
+                continue
             try:
                 re.compile(pattern)
-            except re.error as exc:
+            except (re.error, TypeError) as exc:
                 errors.append(f"❌ 第 {idx} 个{label}错误: {exc}")
-                return
-        info_messages.append(f"✅ {label}有效 (共 {len(value)} 个)")
+                has_error = True
+        if not has_error:
+            info_messages.append(f"✅ {label}有效 (共 {len(value)} 个)")
         return
 
     errors.append(
         f"❌ {field_name} 类型错误，应为字符串或列表，"
         f"当前类型: {type(value).__name__}"
     )
+
+
+def _validate_regex_pattern_config(
+    value: Any,
+    field_name: str,
+    label: str,
+    info_messages: List[str],
+    errors: List[str],
+    optional_message: Optional[str] = None,
+) -> bool:
+    if not value:
+        if optional_message:
+            info_messages.append(optional_message)
+        return False
+    if not isinstance(value, str):
+        errors.append(
+            f"❌ {field_name} 类型错误，应为字符串，当前类型: {type(value).__name__}"
+        )
+        return False
+    try:
+        re.compile(value)
+    except (re.error, TypeError) as exc:
+        errors.append(f"❌ {label}错误: {exc}")
+        return False
+    info_messages.append(f"✅ {label}有效: {value}")
+    return True
+
+
+def _validate_regex_replace_config(
+    value: Any,
+    field_name: str,
+    label: str,
+    regex_pattern: Any,
+    warnings: List[str],
+    errors: List[str],
+    info_messages: List[str],
+) -> None:
+    if value in (None, ""):
+        return
+    if not isinstance(value, str):
+        errors.append(
+            f"❌ {field_name} 类型错误，应为字符串，当前类型: {type(value).__name__}"
+        )
+        return
+    if isinstance(regex_pattern, str):
+        try:
+            re.sub(regex_pattern, value, "test_file.mp4")
+        except Exception as exc:
+            warnings.append(f"⚠️  {label}可能有问题: {exc}")
+            return
+    info_messages.append(f"✅ {label}有效: {value}")
+
+
+def _validate_share_object_config(
+    item: Dict[str, Any],
+    idx: int,
+    warnings: List[str],
+    errors: List[str],
+) -> None:
+    prefix = f"第 {idx} 个链接"
+    share_url = item.get("share_url")
+    if not isinstance(share_url, str) or not share_url.strip():
+        errors.append(f"❌ {prefix}缺少 share_url 字段或类型错误")
+    elif not _SHARE_URL_PATTERN.search(share_url.strip()):
+        errors.append(f"❌ {prefix}格式不正确: {share_url[:50]}...")
+
+    pwd = item.get("pwd")
+    if pwd not in (None, ""):
+        if not isinstance(pwd, str):
+            errors.append(f"❌ {prefix}的 pwd 必须是字符串，当前类型: {type(pwd).__name__}")
+        elif not re.fullmatch(r"[A-Za-z0-9]{4}", pwd):
+            errors.append(f"❌ {prefix}的 pwd 必须是 4 位字母或数字")
+
+    save_dir = item.get("save_dir")
+    if save_dir not in (None, ""):
+        if not isinstance(save_dir, str):
+            errors.append(
+                f"❌ {prefix}的 save_dir 必须是字符串，当前类型: {type(save_dir).__name__}"
+            )
+        elif not save_dir.startswith("/"):
+            warnings.append(f"⚠️  {prefix}保存目录不以 / 开头，可能导致问题: {save_dir}")
+
+    temp_info: List[str] = []
+    regex_pattern = item.get("regex_pattern")
+    _validate_regex_pattern_config(
+        regex_pattern,
+        f"{prefix}的 regex_pattern",
+        f"{prefix}正则过滤规则",
+        temp_info,
+        errors,
+    )
+    _validate_regex_replace_config(
+        item.get("regex_replace"),
+        f"{prefix}的 regex_replace",
+        f"{prefix}正则替换规则",
+        regex_pattern,
+        warnings,
+        errors,
+        temp_info,
+    )
+    for field_name, label in (
+        ("folder_filter", f"{prefix}文件夹过滤规则"),
+        ("exclude_folder_filter", f"{prefix}排除文件夹规则"),
+    ):
+        if field_name in item and item.get(field_name):
+            _validate_regex_filter_config(
+                item.get(field_name), f"{prefix}的 {field_name}", label, temp_info, errors
+            )
 
 
 def validate_runtime_config(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -351,25 +459,27 @@ def validate_runtime_config(config: Dict[str, Any]) -> Dict[str, Any]:
     info_messages: List[str] = []
 
     cookies = normalized.get("cookies")
+    cookie_errors: List[str] = []
     if not cookies:
-        errors.append("❌ 缺少 cookies 字段 (cookies 或 BAIDU_COOKIES)")
+        cookie_errors.append("❌ 缺少 cookies 字段 (cookies 或 BAIDU_COOKIES)")
     elif not isinstance(cookies, str):
-        errors.append(
+        cookie_errors.append(
             f"❌ cookies 必须是字符串，当前类型: {type(cookies).__name__}"
         )
     else:
         if "BDUSS" not in cookies:
-            errors.append("❌ Cookies 中缺少 BDUSS")
+            cookie_errors.append("❌ Cookies 中缺少 BDUSS")
         if "STOKEN" not in cookies:
-            errors.append("❌ Cookies 中缺少 STOKEN")
-        if not errors:
+            cookie_errors.append("❌ Cookies 中缺少 STOKEN")
+        if not cookie_errors:
             cookie_count = len([item for item in cookies.split(";") if "=" in item])
             info_messages.append(f"✅ Cookies 有效 (包含 {cookie_count} 个值)")
+    errors.extend(cookie_errors)
 
     share_urls = normalized.get("share_urls")
     try:
         share_data = normalize_share_urls_value(share_urls, normalized.get("save_dir"))
-    except TypeError as exc:
+    except (TypeError, ValueError) as exc:
         share_data = {
             "share_urls": share_urls,
             "share_urls_text": "",
@@ -390,25 +500,19 @@ def validate_runtime_config(config: Dict[str, Any]) -> Dict[str, Any]:
                 f"✅ 分享链接有效 (共 {share_data['raw_count']} 项，其中 {share_data['share_count']} 个有效)"
             )
 
-        if isinstance(share_urls, list):
-            for idx, item in enumerate(share_urls, 1):
-                if isinstance(item, dict):
-                    share_url = str(item.get("share_url", "")).strip()
-                    if not share_url:
-                        errors.append(f"❌ 第 {idx} 个链接缺少 share_url 字段")
-                    elif not _SHARE_URL_PATTERN.search(share_url):
-                        warnings.append(
-                            f"⚠️  第 {idx} 个链接格式可能不正确: {share_url[:50]}..."
-                        )
-                elif isinstance(item, str):
-                    if item.strip() and not _SHARE_URL_PATTERN.search(item):
-                        warnings.append(
-                            f"⚠️  第 {idx} 个链接格式可能不正确: {item.strip()[:50]}..."
-                        )
-                elif item not in (None, "", []):
+    if isinstance(share_urls, list):
+        for idx, item in enumerate(share_urls, 1):
+            if isinstance(item, dict):
+                _validate_share_object_config(item, idx, warnings, errors)
+            elif isinstance(item, str):
+                if item.strip() and not _SHARE_URL_PATTERN.search(item):
                     warnings.append(
-                        f"⚠️  第 {idx} 个链接格式可能不正确: {str(item)[:50]}..."
+                        f"⚠️  第 {idx} 个链接格式可能不正确: {item.strip()[:50]}..."
                     )
+            elif item not in (None, "", []):
+                errors.append(
+                    f"❌ 第 {idx} 个链接类型错误，应为字符串或对象，当前类型: {type(item).__name__}"
+                )
 
     save_dir = normalized.get("save_dir") or DEFAULT_SAVE_DIR
     if not isinstance(save_dir, str):
@@ -437,20 +541,23 @@ def validate_runtime_config(config: Dict[str, Any]) -> Dict[str, Any]:
 
     regex_pattern = normalized.get("regex_pattern")
     regex_replace = normalized.get("regex_replace")
-    if not regex_pattern:
-        info_messages.append("ℹ️  未设置文件过滤规则 (可选)")
-    else:
-        try:
-            re.compile(regex_pattern)
-            info_messages.append(f"✅ 正则过滤规则有效: {regex_pattern}")
-            if regex_replace:
-                try:
-                    re.sub(regex_pattern, regex_replace, "test_file.mp4")
-                    info_messages.append(f"✅ 正则替换规则有效: {regex_replace}")
-                except Exception as exc:
-                    warnings.append(f"⚠️  正则替换规则可能有问题: {exc}")
-        except re.error as exc:
-            errors.append(f"❌ 正则表达式错误: {exc}")
+    _validate_regex_pattern_config(
+        regex_pattern,
+        "regex_pattern",
+        "正则过滤规则",
+        info_messages,
+        errors,
+        optional_message="ℹ️  未设置文件过滤规则 (可选)",
+    )
+    _validate_regex_replace_config(
+        regex_replace,
+        "regex_replace",
+        "正则替换规则",
+        regex_pattern,
+        warnings,
+        errors,
+        info_messages,
+    )
 
     _validate_regex_filter_config(
         normalized.get("folder_filter"),

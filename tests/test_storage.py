@@ -170,15 +170,20 @@ class BaiduStoragePureMethodTests(unittest.TestCase):
 
     def test_format_error_info_masks_share_urls_and_pwd(self):
         error = ValueError(
-            "分享链接: https://pan.baidu.com/s/abc12345?pwd=1a2B&foo=bar, 备用: surl=xyz987"
+            "分享链接: https://pan.baidu.com/s/abc12345?pwd=1a2B&foo=bar, "
+            "备用: surl=xyz987，提取码 9Z8y，pwd7X6z"
         )
 
         result = format_error_info(error, "处理失败")
 
         self.assertIn("https://pan.baidu.com/s/***?pwd=***&foo=bar", result)
         self.assertIn("surl=***", result)
+        self.assertIn("提取码 ***", result)
+        self.assertIn("pwd***", result)
         self.assertNotIn("abc12345", result)
         self.assertNotIn("1a2B", result)
+        self.assertNotIn("9Z8y", result)
+        self.assertNotIn("7X6z", result)
         self.assertNotIn("xyz987", result)
 
     def test_format_error_info_masks_standalone_surl_in_plain_text(self):
@@ -188,6 +193,75 @@ class BaiduStoragePureMethodTests(unittest.TestCase):
 
         self.assertIn("surl=***", result)
         self.assertNotIn("xyz987", result)
+
+    def test_format_error_info_masks_webhook_and_tokens(self):
+        error = ValueError(
+            "webhook https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=webhook-secret "
+            "access_token=access-secret refresh_token=refresh-secret "
+            "Authorization: Bearer bearer-secret"
+        )
+
+        result = format_error_info(error, "处理失败")
+
+        self.assertIn("key=***", result)
+        self.assertIn("access_token=***", result)
+        self.assertIn("refresh_token=***", result)
+        self.assertIn("Authorization: Bearer ***", result)
+        self.assertNotIn("webhook-secret", result)
+        self.assertNotIn("access-secret", result)
+        self.assertNotIn("refresh-secret", result)
+        self.assertNotIn("bearer-secret", result)
+
+
+class BaiduClientAdapterTests(unittest.TestCase):
+    def _adapter(self):
+        adapter = BaiduClientAdapter.__new__(BaiduClientAdapter)
+        adapter.client = Mock()
+        adapter.max_retries = 3
+        adapter.is_github_actions = False
+        adapter.base_retry_delay = 0
+        return adapter
+
+    def test_list_makedir_and_rename_retry_temporary_json_error(self):
+        error = RequestsJSONDecodeError("Expecting value", "", 0)
+        cases = [
+            ("list", ("/save",), [error, ["ok"]], ["ok"]),
+            ("makedir", ("/save",), [error, None], None),
+            ("rename", ("/save/a", "/save/b"), [error, None], None),
+        ]
+
+        with patch("storage_client.time.sleep"):
+            for method_name, args, side_effect, expected in cases:
+                with self.subTest(method_name=method_name):
+                    adapter = self._adapter()
+                    getattr(adapter.client, method_name).side_effect = side_effect
+
+                    result = getattr(adapter, method_name)(*args)
+
+                    self.assertEqual(expected, result)
+                    self.assertEqual(2, getattr(adapter.client, method_name).call_count)
+
+    def test_transfer_shared_paths_does_not_retry_in_adapter(self):
+        adapter = self._adapter()
+        adapter.client.transfer_shared_paths.side_effect = RequestsJSONDecodeError(
+            "Expecting value", "", 0
+        )
+
+        with self.assertRaises(RequestsJSONDecodeError):
+            adapter.transfer_shared_paths(remotedir="/save", fs_ids=[1])
+
+        adapter.client.transfer_shared_paths.assert_called_once_with(
+            remotedir="/save", fs_ids=[1]
+        )
+
+    def test_list_does_not_swallow_retry_abort_errors(self):
+        adapter = self._adapter()
+        adapter.client.list.side_effect = RuntimeError(
+            "error_code: 4, message: please try again later"
+        )
+
+        with self.assertRaises(RuntimeError):
+            adapter.list("/save")
 
 
 class SharedPathServiceTests(unittest.TestCase):
@@ -682,6 +756,31 @@ class WeChatNotifierTests(unittest.TestCase):
         self.assertNotIn("1a2B", masked)
         self.assertNotIn("xyz987", masked)
 
+    def test_send_message_masks_sensitive_payload_before_posting(self):
+        notifier = WeChatNotifier(
+            "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=webhook-secret"
+        )
+        response = Mock()
+        response.status_code = 200
+        response.json.return_value = {"errcode": 0}
+        message = (
+            "cookie BDUSS=bduss-secret; STOKEN=stoken-secret "
+            "链接 https://pan.baidu.com/s/abc12345?pwd=1a2B "
+            "token=access-secret key=webhook-secret"
+        )
+
+        with patch("wechat_notifier.requests.post", return_value=response) as post:
+            self.assertTrue(notifier.send_message(message, "markdown"))
+
+        payload = post.call_args.kwargs["json"]
+        content = payload["markdown"]["content"]
+        self.assertNotIn("bduss-secret", content)
+        self.assertNotIn("stoken-secret", content)
+        self.assertNotIn("abc12345", content)
+        self.assertNotIn("1a2B", content)
+        self.assertNotIn("access-secret", content)
+        self.assertNotIn("webhook-secret", content)
+
 
 class BaiduStorageFlowTests(unittest.TestCase):
     def setUp(self):
@@ -732,7 +831,10 @@ class BaiduStorageFlowTests(unittest.TestCase):
 
         result = self.storage.transfer_share("https://pan.baidu.com/s/abc")
 
-        self.assertEqual({"success": False, "error": "创建目录失败: /save"}, result)
+        self.assertFalse(result["success"])
+        self.assertEqual("创建目录失败: /save", result["error"])
+        self.assertEqual(1, result["transfer_failed_count"])
+        self.assertEqual("a.txt", result["transfer_failed_files"][0]["clean_path"])
 
     def test_scan_local_files_dict_uses_merged_candidate_dir_scan(self):
         self.storage.path_service.list_local_files_in_dirs.return_value = []
@@ -948,6 +1050,46 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.assertIn("scan failed", result["error"])
         self.assertEqual(1, result["completed_count"])
         self.storage.client.transfer_shared_paths.assert_called_once()
+
+    def test_transfer_share_streaming_warns_when_producer_thread_stays_alive(self):
+        context = {
+            "shared_paths": [Mock(is_dir=False)],
+            "uk": 1,
+            "share_id": 2,
+            "bdstoken": "token",
+        }
+        fake_logger = Mock()
+        joins = []
+
+        class FakeThread:
+            def __init__(self, target, **kwargs):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+            def join(self, timeout=None):
+                joins.append(timeout)
+
+            def is_alive(self):
+                return True
+
+        self.storage.share_service.iter_shared_files.return_value = []
+
+        with patch("storage.threading.Thread", FakeThread), patch(
+            "storage.get_logger", return_value=fake_logger
+        ), patch("storage.STREAM_PRODUCER_JOIN_TIMEOUT", 0.01):
+            result = self.storage._transfer_share_streaming(
+                context,
+                "https://pan.baidu.com/s/abc",
+                "/save",
+            )
+
+        self.assertTrue(result["skipped"])
+        self.assertEqual([0.01], joins)
+        fake_logger.warning.assert_called_once_with(
+            "共享文件扫描线程未及时退出，继续处理已完成结果"
+        )
 
     def test_transfer_share_uses_dir_fast_path_for_single_directory(self):
         shared_dir = SimpleNamespace(is_dir=True, fs_id=10, path="/share/course")
@@ -1872,22 +2014,31 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.assertEqual([350, 300, 200, 150], batch_lengths)
         notify.assert_not_called()
 
-    def test_execute_transfer_plan_retries_json_decode_batch_without_smaller_batches(self):
+    def test_execute_transfer_plan_isolates_retryable_batch_failures(self):
         self.storage.path_service.normalize_path.side_effect = lambda path, **kwargs: path
         self.storage._scan_local_files_dict = Mock(return_value={})
         transfer_list = [
             (fs_id, "/save", f"{fs_id}.txt", f"{fs_id}.txt", False)
-            for fs_id in range(350)
+            for fs_id in range(3)
         ]
-        self.storage.client.transfer_shared_paths.side_effect = [
-            RequestsJSONDecodeError("Expecting value", "", 0),
-            RequestsJSONDecodeError("Expecting value", "", 0),
-            None,
-        ]
+        failed_full_batch = False
+        failed_single_item = False
 
-        with patch("storage.TRANSFER_BATCH_SIZE", 999), patch("storage.time.sleep"), patch(
-            "storage.handle_error_and_notify"
-        ) as notify:
+        def transfer_side_effect(**kwargs):
+            nonlocal failed_full_batch, failed_single_item
+            fs_ids = kwargs["fs_ids"]
+            if len(fs_ids) > 1 and not failed_full_batch:
+                failed_full_batch = True
+                raise RequestsJSONDecodeError("Expecting value", "", 0)
+            if fs_ids == [1] and not failed_single_item:
+                failed_single_item = True
+                raise RequestsJSONDecodeError("Expecting value", "", 0)
+
+        self.storage.client.transfer_shared_paths.side_effect = transfer_side_effect
+
+        with patch("storage.TRANSFER_BATCH_SIZE", 3), patch(
+            "storage.TRANSFER_FAILED_RETRY_ATTEMPTS", 1
+        ), patch("storage.time.sleep"), patch("storage.handle_error_and_notify") as notify:
             success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
                 transfer_list, "url", 1, 2, "token", "/save"
             )
@@ -1896,10 +2047,10 @@ class BaiduStorageFlowTests(unittest.TestCase):
             len(call_args.kwargs["fs_ids"])
             for call_args in self.storage.client.transfer_shared_paths.call_args_list
         ]
-        self.assertEqual(350, success_count)
-        self.assertEqual(transfer_list, successful_items)
+        self.assertEqual(3, success_count)
+        self.assertCountEqual(transfer_list, successful_items)
         self.assertEqual([], failed_items)
-        self.assertEqual([350, 350, 350], batch_lengths)
+        self.assertEqual([3, 1, 1, 1, 1], batch_lengths)
         notify.assert_not_called()
 
     def test_execute_transfer_plan_does_not_hot_retry_storage_temporary_errors(self):
@@ -1927,6 +2078,32 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.assertEqual(1, self.storage.client.transfer_shared_paths.call_count)
         sleep.assert_not_called()
         notify.assert_not_called()
+
+    def test_execute_transfer_plan_stops_remaining_batches_on_storage_temporary_error(self):
+        self.storage.path_service.normalize_path.side_effect = lambda path, **kwargs: path
+        transfer_list = [
+            (1, "/save", "a.txt", "a.txt", False),
+            (2, "/save", "b.txt", "b.txt", False),
+        ]
+        self.storage.client.transfer_shared_paths.side_effect = RuntimeError(
+            "error_code: 4, message: 存储好像出问题了，请稍候再试"
+        )
+        self.storage._split_existing_transfer_items = Mock(
+            return_value=([], [transfer_list[0]])
+        )
+
+        with patch("storage.TRANSFER_BATCH_SIZE", 1), patch(
+            "storage.TRANSFER_FAILED_RETRY_ATTEMPTS", 5
+        ), patch("storage.time.sleep") as sleep, patch("storage.handle_error_and_notify"):
+            success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
+                transfer_list, "url", 1, 2, "token", "/save"
+            )
+
+        self.assertEqual(0, success_count)
+        self.assertEqual([], successful_items)
+        self.assertEqual(["a.txt", "b.txt"], [item["clean_path"] for item in failed_items])
+        self.assertEqual(1, self.storage.client.transfer_shared_paths.call_count)
+        sleep.assert_not_called()
 
     def test_execute_transfer_plan_retries_failed_items_only(self):
         self.storage.path_service.normalize_path.side_effect = lambda path, **kwargs: path

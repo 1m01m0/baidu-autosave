@@ -3,17 +3,16 @@ name: Baidu Transfer Task
 on:
   schedule:
     # 每六小时执行一次 (UTC时间)
-    - cron: '0 */6 * * *'
+    - cron: '17 */6 * * *'
   workflow_dispatch: # 允许手动触发
+
+permissions:
+  contents: read
 
 jobs:
   transfer:
     runs-on: ubuntu-latest
     env:
-      BAIDU_COOKIES: ${{ secrets.BAIDU_COOKIES }}
-      SHARE_URLS: ${{ secrets.SHARE_URLS }}
-      SAVE_DIR: ${{ secrets.SAVE_DIR }}
-      WECHAT_WEBHOOK: ${{ secrets.WECHAT_WEBHOOK }}
       GITHUB_ACTIONS: 'true'
 
     steps:
@@ -47,6 +46,11 @@ jobs:
       id: first_attempt
       timeout-minutes: 7
       continue-on-error: true
+      env:
+        BAIDU_COOKIES: ${{ secrets.BAIDU_COOKIES }}
+        SHARE_URLS: ${{ secrets.SHARE_URLS }}
+        SAVE_DIR: ${{ secrets.SAVE_DIR }}
+        WECHAT_WEBHOOK: ${{ secrets.WECHAT_WEBHOOK }}
       run: |
         echo "开始执行转存任务 (第一次尝试)"
         echo "超时时间: 7 分钟"
@@ -56,10 +60,15 @@ jobs:
     - name: Run transfer task (Second attempt)
       if: steps.first_attempt.outcome == 'failure'
       timeout-minutes: 10
+      env:
+        BAIDU_COOKIES: ${{ secrets.BAIDU_COOKIES }}
+        SHARE_URLS: ${{ secrets.SHARE_URLS }}
+        SAVE_DIR: ${{ secrets.SAVE_DIR }}
+        WECHAT_WEBHOOK: ${{ secrets.WECHAT_WEBHOOK }}
       run: |
         echo "第一次尝试失败，开始第二次尝试"
         echo "超时时间: 10 分钟"
         echo "========================================"
         sleep 5
         ./scripts/run_transfer_task.sh
-      
+

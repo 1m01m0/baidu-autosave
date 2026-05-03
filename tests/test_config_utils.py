@@ -116,7 +116,7 @@ class ValidateRuntimeConfigTests(unittest.TestCase):
         result = validate_runtime_config(config)
 
         self.assertTrue(any("STOKEN" in msg for msg in result["errors"]))
-        self.assertTrue(any("正则表达式错误" in msg for msg in result["errors"]))
+        self.assertTrue(any("正则过滤规则错误" in msg for msg in result["errors"]))
 
     def test_validate_runtime_config_reports_bad_exclude_folder_filter(self):
         config = {
@@ -139,6 +139,44 @@ class ValidateRuntimeConfigTests(unittest.TestCase):
         result = validate_runtime_config(config)
 
         self.assertTrue(any("排除文件夹规则类型错误" in msg for msg in result["errors"]))
+
+    def test_validate_runtime_config_reports_non_string_regex_fields(self):
+        config = {
+            "cookies": "BDUSS=foo; STOKEN=bar",
+            "share_urls": "https://pan.baidu.com/s/abc12345",
+            "regex_pattern": [".*"],
+            "regex_replace": 123,
+        }
+
+        result = validate_runtime_config(config)
+
+        self.assertTrue(any("regex_pattern 类型错误" in msg for msg in result["errors"]))
+        self.assertTrue(any("regex_replace 类型错误" in msg for msg in result["errors"]))
+
+    def test_validate_runtime_config_reports_bad_share_object(self):
+        config = {
+            "cookies": "BDUSS=foo; STOKEN=bar",
+            "share_urls": [
+                {
+                    "pwd": 123,
+                    "save_dir": 456,
+                    "regex_pattern": [".*"],
+                    "regex_replace": 789,
+                    "folder_filter": ["ok", 1],
+                    "exclude_folder_filter": "[",
+                }
+            ],
+        }
+
+        result = validate_runtime_config(config)
+
+        self.assertTrue(any("缺少 share_url" in msg for msg in result["errors"]))
+        self.assertTrue(any("pwd 必须是字符串" in msg for msg in result["errors"]))
+        self.assertTrue(any("save_dir 必须是字符串" in msg for msg in result["errors"]))
+        self.assertTrue(any("regex_pattern 类型错误" in msg for msg in result["errors"]))
+        self.assertTrue(any("regex_replace 类型错误" in msg for msg in result["errors"]))
+        self.assertTrue(any("文件夹过滤规则类型错误" in msg for msg in result["errors"]))
+        self.assertTrue(any("排除文件夹规则错误" in msg for msg in result["errors"]))
 
 
 class LoadRuntimeConfigTests(unittest.TestCase):
@@ -214,6 +252,22 @@ class LoadRuntimeConfigTests(unittest.TestCase):
                     ValueError, "配置文件缺少 share_urls"
                 ):
                     load_runtime_config(config_path)
+
+    def test_load_runtime_config_raises_for_invalid_runtime_config(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = os.path.join(temp_dir, "config.json")
+            with open(config_path, "w", encoding="utf-8") as fh:
+                json.dump(
+                    {
+                        "cookies": "BDUSS=foo; STOKEN=bar",
+                        "share_urls": "https://pan.baidu.com/s/abc12345",
+                        "regex_pattern": [".*"],
+                    },
+                    fh,
+                )
+
+            with self.assertRaisesRegex(ValueError, "配置校验失败"):
+                load_runtime_config(config_path)
 
 
 if __name__ == "__main__":

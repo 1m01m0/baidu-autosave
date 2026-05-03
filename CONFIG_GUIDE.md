@@ -28,7 +28,7 @@ cp config.example.json config.json
 python transfer_runner.py
 ```
 
-> 配置加载规则：优先读取项目根目录 `config.json`；如果本地配置不存在或读取失败，会回退到环境变量 `BAIDU_COOKIES`、`SHARE_URLS`、`SAVE_DIR`、`WECHAT_WEBHOOK`。
+> 配置加载规则：优先读取项目根目录 `config.json`；仅当本地配置不存在时，才会回退到环境变量 `BAIDU_COOKIES`、`SHARE_URLS`、`SAVE_DIR`、`WECHAT_WEBHOOK`。如果 `config.json` 存在但内容非法或缺少必需字段，程序会直接报错。
 >
 > 字段别名兼容：`cookies/BAIDU_COOKIES`、`share_urls/SHARE_URLS`、`save_dir/SAVE_DIR`、`wechat_webhook/WECHAT_WEBHOOK` 会统一归一化处理。
 
@@ -94,7 +94,8 @@ BDUSS=xxx; STOKEN=yyy; BDUSS_BFESS=zzz; ...
     "pwd": "f9c7",
     "save_dir": "/视频",
     "regex_pattern": "\\.(mp4|mkv)$",
-    "folder_filter": "高清"
+    "folder_filter": "高清",
+    "exclude_folder_filter": "花絮|预告"
   }
 ]
 ```
@@ -112,7 +113,7 @@ BDUSS=xxx; STOKEN=yyy; BDUSS_BFESS=zzz; ...
 **归一化规则：**
 - 字符串形式支持逗号分隔或换行分隔，运行时会统一按行解析
 - 数组形式支持字符串数组与对象数组混用
-- 顶层 `folder_filter`、`regex_pattern`、`regex_replace` 会作为默认值补到未单独配置的链接
+- 顶层 `folder_filter`、`exclude_folder_filter`、`regex_pattern`、`regex_replace` 会作为默认值补到未单独配置的链接
 - 对象数组中的局部配置优先级高于顶层全局配置
 
 ---
@@ -183,9 +184,11 @@ BDUSS=xxx; STOKEN=yyy; BDUSS_BFESS=zzz; ...
 **示例：**
 ```json
 "regex_pattern": "^(\\d{4})-(.*)\\.pdf$",
-"regex_replace": "$1/$2.pdf"
+"regex_replace": "\\1/\\2.pdf"
 ```
 效果：`2024-财务报表.pdf` → `2024/财务报表.pdf`
+
+> 替换语法使用 Python `re.sub()` 规则，分组引用请写 `\\1`、`\\2`，不要写 `$1`、`$2`。
 
 ---
 
@@ -211,6 +214,18 @@ BDUSS=xxx; STOKEN=yyy; BDUSS_BFESS=zzz; ...
 只转存名称包含"高级"、"VIP"或"精品"的文件夹。
 
 **注意：** 不匹配的文件夹及其所有子文件夹都会被跳过。
+
+---
+
+#### `exclude_folder_filter` (字符串或数组)
+【全局配置】排除文件夹规则。匹配的文件夹会被跳过，优先级高于转存目录分治中的子目录处理。
+
+**示例：**
+```json
+"exclude_folder_filter": "花絮|预告|sample"
+```
+
+对象数组中的单个链接也可以单独配置 `exclude_folder_filter`，局部配置优先于顶层全局配置。
 
 ---
 
@@ -255,7 +270,8 @@ BDUSS=xxx; STOKEN=yyy; BDUSS_BFESS=zzz; ...
       "pwd": "1234",
       "save_dir": "/视频课程",
       "regex_pattern": "\\.(mp4|mkv)$",
-      "folder_filter": "高级班"
+      "folder_filter": "高级班",
+      "exclude_folder_filter": "预告|花絮"
     },
     {
       "share_url": "https://pan.baidu.com/s/5efgh5678",
@@ -362,7 +378,7 @@ python transfer_runner.py
 
 **GitHub Actions 自动运行：**
 - 配置会自动读取
-- 每 2 小时自动执行一次
+- 每 6 小时自动执行一次（当前 workflow 在 UTC 时间每 6 小时的第 17 分钟触发）
 - 完成后通过企业微信通知
 
 ---

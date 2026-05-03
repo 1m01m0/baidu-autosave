@@ -236,15 +236,17 @@ def set_secret(repo: str, name: str, value: str) -> None:
     try:
         print(f"设置 {name} 到 {repo}...")
         subprocess.run(
-            ["gh", "secret", "set", name, "-R", repo, "--body", value],
+            ["gh", "secret", "set", name, "-R", repo],
+            input=value,
+            text=True,
             check=True,
             capture_output=True,
         )
         print(f"✅ {name} 设置成功")
     except subprocess.CalledProcessError as e:
-        print(f"❌ 设置 {name} 失败: {e}")
+        print(f"❌ 设置 {name} 失败，退出码: {e.returncode}")
         if e.stderr:
-            print(f"错误详情: {e.stderr.decode('utf-8', errors='ignore')}")
+            print(f"错误详情: {mask_cookie_string(e.stderr)}")
         sys.exit(1)
     except Exception as e:
         print(f"❌ 设置 {name} 时发生错误: {e}")
@@ -292,6 +294,7 @@ def write_env_file(env_path: Path, cookies_min: str, cookies_full: str) -> None:
             f'BAIDU_COOKIES="{cookies_min}"\nBAIDU_COOKIES_FULL="{cookies_full}"\n'
         )
         env_path.write_text(content, encoding="utf-8")
+        env_path.chmod(0o600)
         print(f"✅ Cookies 已写入: {env_path}")
     except Exception as e:
         print(f"❌ 写入 env 文件失败: {e}")

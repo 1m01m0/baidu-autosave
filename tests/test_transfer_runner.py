@@ -28,7 +28,8 @@ class TransferRunnerSmokeTests(unittest.TestCase):
             "config_path": "config.json",
             "cookies": "BDUSS=foo; STOKEN=bar",
             "wechat_webhook": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test",
-            "share_configs": [{"share_url": "https://pan.baidu.com/s/abc12345"}],
+            "share_urls": [{"share_url": "https://pan.baidu.com/s/abc12345", "save_dir": "/AutoTransfer"}],
+            "share_configs": [{"share_url": "https://pan.baidu.com/s/abc12345", "save_dir": "/AutoTransfer"}],
         }
         result = {
             "success": True,
@@ -63,13 +64,49 @@ class TransferRunnerSmokeTests(unittest.TestCase):
         fake_notifier.send_transfer_result.assert_called_once_with(result, config)
         mock_shutdown.assert_called_once_with(success=True)
 
+    def test_main_exits_when_loaded_config_fails_validation(self):
+        config = {
+            "config_source": "file",
+            "config_path": "config.json",
+            "cookies": "BDUSS=foo; STOKEN=bar",
+            "wechat_webhook": "",
+            "share_urls": "https://pan.baidu.com/s/abc12345",
+            "share_configs": [{"share_url": "https://pan.baidu.com/s/abc12345"}],
+        }
+        fake_logger = Mock()
+
+        with patch.object(transfer_runner, "setup_logging"), patch.object(
+            transfer_runner, "get_logger", return_value=fake_logger
+        ), patch.object(transfer_runner, "log_startup"), patch.object(
+            transfer_runner, "check_network_connectivity"
+        ), patch.object(
+            transfer_runner, "load_runtime_config", return_value=config
+        ), patch.object(
+            transfer_runner,
+            "validate_runtime_config",
+            return_value={"config": config, "errors": ["bad config"], "warnings": [], "info": []},
+        ), patch.object(
+            transfer_runner, "handle_error_and_notify"
+        ) as mock_handle_error, patch.object(
+            transfer_runner.sys, "exit", side_effect=SystemExit(1)
+        ), patch.object(
+            transfer_runner, "log_shutdown"
+        ) as mock_shutdown:
+            with self.assertRaises(SystemExit) as cm:
+                transfer_runner.main()
+
+        self.assertEqual(1, cm.exception.code)
+        mock_handle_error.assert_called_once()
+        mock_shutdown.assert_called_once_with(success=False)
+
     def test_main_exits_when_transfer_fails(self):
         config = {
             "config_source": "file",
             "config_path": "config.json",
             "cookies": "BDUSS=foo; STOKEN=bar",
             "wechat_webhook": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test",
-            "share_configs": [{"share_url": "https://pan.baidu.com/s/abc12345"}],
+            "share_urls": [{"share_url": "https://pan.baidu.com/s/abc12345", "save_dir": "/AutoTransfer"}],
+            "share_configs": [{"share_url": "https://pan.baidu.com/s/abc12345", "save_dir": "/AutoTransfer"}],
         }
         result = {"success": False, "error": "失败"}
         fake_storage = Mock()
@@ -106,7 +143,8 @@ class TransferRunnerSmokeTests(unittest.TestCase):
             "config_path": "config.json",
             "cookies": "BDUSS=foo; STOKEN=bar",
             "wechat_webhook": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test",
-            "share_configs": [{"share_url": "https://pan.baidu.com/s/abc12345"}],
+            "share_urls": [{"share_url": "https://pan.baidu.com/s/abc12345", "save_dir": "/AutoTransfer"}],
+            "share_configs": [{"share_url": "https://pan.baidu.com/s/abc12345", "save_dir": "/AutoTransfer"}],
         }
         result = {
             "success": False,
@@ -208,7 +246,8 @@ class TransferRunnerSmokeTests(unittest.TestCase):
             "config_path": "config.json",
             "cookies": "BDUSS=foo; STOKEN=bar",
             "wechat_webhook": "",
-            "share_configs": [{"share_url": "https://pan.baidu.com/s/new12345"}],
+            "share_urls": [{"share_url": "https://pan.baidu.com/s/new12345", "save_dir": "/AutoTransfer"}],
+            "share_configs": [{"share_url": "https://pan.baidu.com/s/new12345", "save_dir": "/AutoTransfer"}],
         }
         history_config = {"share_url": "https://pan.baidu.com/s/old12345", "save_dir": "/old"}
         fake_storage = Mock()
@@ -248,12 +287,132 @@ class TransferRunnerSmokeTests(unittest.TestCase):
             progress_callback=transfer_runner.progress_callback,
         )
 
+    def test_main_skips_history_records_at_attempt_limit(self):
+        config = {
+            "config_source": "file",
+            "config_path": "config.json",
+            "cookies": "BDUSS=foo; STOKEN=bar",
+            "wechat_webhook": "",
+            "share_urls": [{"share_url": "https://pan.baidu.com/s/new12345", "save_dir": "/AutoTransfer"}],
+            "share_configs": [{"share_url": "https://pan.baidu.com/s/new12345", "save_dir": "/AutoTransfer"}],
+        }
+        history_config = {"share_url": "https://pan.baidu.com/s/old12345", "save_dir": "/old"}
+        fake_storage = Mock()
+        fake_storage.is_valid.return_value = True
+        fake_storage.get_quota_info.return_value = None
+        fake_storage.transfer_multiple_shares.return_value = {
+            "success": True,
+            "results": [],
+            "summary": "完成",
+        }
+        fake_logger = Mock()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            failed_path = Path(tmpdir) / "failed.json"
+            transfer_runner.save_failed_transfer_records(
+                [
+                    {
+                        "share_config": history_config,
+                        "failed_files": [{"clean_path": "secret.txt", "error": "pwd=1a2B"}],
+                        "attempts": 3,
+                    }
+                ],
+                failed_path,
+            )
+            with patch.object(transfer_runner, "FAILED_TRANSFERS_FILE", failed_path), patch.object(
+                transfer_runner, "MAX_FAILED_TRANSFER_ATTEMPTS", 3
+            ), patch.object(transfer_runner, "setup_logging"), patch.object(
+                transfer_runner, "get_logger", return_value=fake_logger
+            ), patch.object(transfer_runner, "log_startup"), patch.object(
+                transfer_runner, "log_config_loaded"
+            ), patch.object(transfer_runner, "check_network_connectivity"), patch.object(
+                transfer_runner, "load_runtime_config", return_value=config
+            ), patch.object(
+                transfer_runner, "BaiduStorage", return_value=fake_storage
+            ), patch.object(transfer_runner, "log_shutdown"):
+                transfer_runner.main()
+
+            self.assertFalse(failed_path.exists())
+
+        fake_storage.transfer_multiple_shares.assert_called_once_with(
+            share_configs=config["share_configs"],
+            progress_callback=transfer_runner.progress_callback,
+        )
+        self.assertTrue(
+            any("历史失败清单" in call.args[0] and "重试上限" in call.args[0]
+                for call in fake_logger.warning.call_args_list)
+        )
+        self.assertFalse(
+            any("1a2B" in str(call.args) for call in fake_logger.warning.call_args_list)
+        )
+
+    def test_main_drops_history_record_after_retry_reaches_attempt_limit(self):
+        config = {
+            "config_source": "file",
+            "config_path": "config.json",
+            "cookies": "BDUSS=foo; STOKEN=bar",
+            "wechat_webhook": "",
+            "share_urls": [{"share_url": "https://pan.baidu.com/s/new12345", "save_dir": "/AutoTransfer"}],
+            "share_configs": [{"share_url": "https://pan.baidu.com/s/new12345", "save_dir": "/AutoTransfer"}],
+        }
+        history_config = {"share_url": "https://pan.baidu.com/s/old12345", "save_dir": "/old"}
+        retry_result = {
+            "success": False,
+            "partial": True,
+            "results": [
+                {
+                    "success": False,
+                    "partial": True,
+                    "retry_config": history_config,
+                    "transfer_failed_files": [{"clean_path": "a.txt", "error": "boom"}],
+                    "error": "boom",
+                }
+            ],
+        }
+        fake_storage = Mock()
+        fake_storage.is_valid.return_value = True
+        fake_storage.get_quota_info.return_value = None
+        fake_storage.transfer_multiple_shares.side_effect = [
+            retry_result,
+            {"success": True, "results": [], "summary": "完成"},
+        ]
+        fake_logger = Mock()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            failed_path = Path(tmpdir) / "failed.json"
+            transfer_runner.save_failed_transfer_records(
+                [{"share_config": history_config, "failed_files": [], "attempts": 2}],
+                failed_path,
+            )
+            with patch.object(transfer_runner, "FAILED_TRANSFERS_FILE", failed_path), patch.object(
+                transfer_runner, "MAX_FAILED_TRANSFER_ATTEMPTS", 3
+            ), patch.object(transfer_runner, "setup_logging"), patch.object(
+                transfer_runner, "get_logger", return_value=fake_logger
+            ), patch.object(transfer_runner, "log_startup"), patch.object(
+                transfer_runner, "log_config_loaded"
+            ), patch.object(transfer_runner, "check_network_connectivity"), patch.object(
+                transfer_runner, "load_runtime_config", return_value=config
+            ), patch.object(
+                transfer_runner, "BaiduStorage", return_value=fake_storage
+            ), patch.object(transfer_runner, "log_shutdown"):
+                transfer_runner.main()
+
+            self.assertFalse(failed_path.exists())
+
+        self.assertEqual(2, fake_storage.transfer_multiple_shares.call_count)
+        self.assertTrue(
+            any("重试后" in call.args[0] and "重试上限" in call.args[0]
+                for call in fake_logger.warning.call_args_list)
+        )
+
     def test_main_saves_current_failed_records(self):
         config = {
             "config_source": "file",
             "config_path": "config.json",
             "cookies": "BDUSS=foo; STOKEN=bar",
             "wechat_webhook": "",
+            "share_urls": [{"share_url": "https://pan.baidu.com/s/abc12345", "save_dir": "/a"}],
+            "save_dir": "/a",
             "share_configs": [{"share_url": "https://pan.baidu.com/s/abc12345", "save_dir": "/a"}],
         }
         result = {

@@ -54,9 +54,9 @@ Thumbs.db
 config.json
 *.env
 
-# Test files
-test_*.py
-*_test.py
+# Root-level temporary test files
+/test_*.py
+/*_test.py
 .python-version
 transfer_runner_local.py
 share_urls.txt

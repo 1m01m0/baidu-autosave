@@ -19,12 +19,24 @@ _error_collections: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
 _collection_lock = threading.Lock()
 
 # 预编译正则表达式以提高性能
-_PWD_PATTERN = re.compile(r"(\bpwd=)([A-Za-z0-9]{4})", re.IGNORECASE)
+_PWD_PATTERN = re.compile(
+    r"(((?<![A-Za-z0-9_])pwd|密码|提取码)\s*[:：=]?\s*)([A-Za-z0-9]{4})",
+    re.IGNORECASE,
+)
 _UK_PATTERN = re.compile(r"(\buk\s*[:=]\s*)(\d+)", re.IGNORECASE)
-_SHARE_ID_PATTERN = re.compile(r"(\bshare_id\s*[:=]\s*)(\d+)", re.IGNORECASE)
+_SHARE_ID_PATTERN = re.compile(r"(\bshare_?id\s*[:=]\s*)(\d+)", re.IGNORECASE)
 _BDSTOKEN_PATTERN = re.compile(
     r"(\bbdstoken\s*[:=]\s*)([A-Za-z0-9_-]+)", re.IGNORECASE
 )
+_TOKEN_PATTERN = re.compile(
+    r"((?:\baccess_token\b|\brefresh_token\b|\btoken\b)\s*[:=]\s*)([A-Za-z0-9._~+/=-]{6,})",
+    re.IGNORECASE,
+)
+_AUTHORIZATION_BEARER_PATTERN = re.compile(
+    r"(\bAuthorization\s*:\s*Bearer\s+)([A-Za-z0-9._~+/=-]{6,})",
+    re.IGNORECASE,
+)
+_WEBHOOK_KEY_PATTERN = re.compile(r"(\bkey=)([^&\s]+)", re.IGNORECASE)
 _SHARE_LINK_TOKEN_PATTERN = re.compile(
     r"(https?://pan\.baidu\.com/s/)([A-Za-z0-9_-]+)", re.IGNORECASE
 )
@@ -59,26 +71,29 @@ def collect_transferred_files(result: Optional[Dict[str, Any]]) -> List[str]:
 
 
 
-def _mask_sensitive(text: Optional[str]) -> Optional[str]:
+def mask_sensitive(text: Optional[str]) -> Optional[str]:
     """
-    掩码敏感信息（pwd, uk, share_id, bdstoken、分享链接等）
-    注意：此函数会调用 mask_cookies，但通过延迟加载避免循环导入
+    掩码敏感信息（cookie、pwd、token、webhook key、分享链接等）。
     """
     if text is None:
         return text
 
-    # 先掩码 cookies（避免循环导入，直接调用函数）
-    masked = mask_cookies(text)
-
-    # 掩码其他敏感信息
+    masked = mask_cookies(str(text))
     masked = _PWD_PATTERN.sub(r"\1***", masked)
     masked = _UK_PATTERN.sub(r"\1***", masked)
     masked = _SHARE_ID_PATTERN.sub(r"\1***", masked)
     masked = _BDSTOKEN_PATTERN.sub(r"\1***", masked)
+    masked = _TOKEN_PATTERN.sub(r"\1***", masked)
+    masked = _AUTHORIZATION_BEARER_PATTERN.sub(r"\1***", masked)
+    masked = _WEBHOOK_KEY_PATTERN.sub(r"\1***", masked)
     masked = _SHARE_LINK_TOKEN_PATTERN.sub(r"\1***", masked)
     masked = _SHARE_SURL_TOKEN_PATTERN.sub(r"\1***", masked)
-
     return masked
+
+
+def _mask_sensitive(text: Optional[str]) -> Optional[str]:
+    """兼容旧调用，实际委托给统一脱敏入口。"""
+    return mask_sensitive(text)
 
 
 def _format_error_base(error: Exception, context: str = "") -> str:
@@ -428,7 +443,7 @@ def mask_cookies(text: Optional[str]) -> Optional[str]:
             return f"{match.group(1)}{MASK_REPLACEMENT}{match.group(2)}"
         return f"{match.group(1)}{MASK_REPLACEMENT}"
 
-    masked = text
+    masked = str(text)
     for pattern in _COOKIE_PATTERNS:
         masked = pattern.sub(repl, masked)
     return masked
