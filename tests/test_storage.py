@@ -45,6 +45,25 @@ class BaiduStoragePureMethodTests(unittest.TestCase):
         self.storage.path_service = Mock()
         self.storage.share_service = Mock()
 
+    def test_transfer_item_keeps_sequence_compatibility(self):
+        item = TransferItem(1, "/save", "a.txt", "b.txt", True, "md5")
+
+        self.assertEqual((1, "/save", "a.txt", "b.txt", True), item.as_tuple())
+        self.assertEqual([1, "/save", "a.txt", "b.txt", True], list(item))
+        self.assertEqual("b.txt", item[3])
+        self.assertEqual(("a.txt", "b.txt"), item[2:4])
+        self.assertEqual(1, item.count("a.txt"))
+        self.assertEqual(3, item.index("b.txt"))
+        self.assertEqual((1, "/save", "a.txt", "b.txt", True), item)
+        self.assertEqual("md5", item.src_md5)
+
+    def test_transfer_item_equality_matches_old_tuple_payload(self):
+        item = TransferItem(1, "/save", "a.txt", "b.txt", True, "md5-a")
+        same_payload = TransferItem(1, "/save", "a.txt", "b.txt", True, "md5-b")
+
+        self.assertEqual(item, same_payload)
+        self.assertEqual(hash(item), hash(same_payload))
+
     def test_parse_share_error_maps_known_cases(self):
         self.assertEqual(
             "分享链接已失效（文件禁止分享）",
@@ -769,7 +788,9 @@ class WeChatNotifierTests(unittest.TestCase):
             "token=access-secret key=webhook-secret"
         )
 
-        with patch("wechat_notifier.requests.post", return_value=response) as post:
+        with patch("wechat_notifier.requests.post", return_value=response) as post, patch(
+            "builtins.print"
+        ):
             self.assertTrue(notifier.send_message(message, "markdown"))
 
         payload = post.call_args.kwargs["json"]
@@ -839,7 +860,8 @@ class BaiduStorageFlowTests(unittest.TestCase):
     def test_scan_local_files_dict_uses_merged_candidate_dir_scan(self):
         self.storage.path_service.list_local_files_in_dirs.return_value = []
 
-        result = self.storage._scan_local_files_dict("/save", relative_dirs={"A/1", "A/2"})
+        with patch("storage.get_logger", return_value=Mock()):
+            result = self.storage._scan_local_files_dict("/save", relative_dirs={"A/1", "A/2"})
 
         self.assertEqual({}, result)
         self.storage.path_service.list_local_files_in_dirs.assert_called_once_with(
@@ -1736,7 +1758,8 @@ class BaiduStorageFlowTests(unittest.TestCase):
     def test_process_single_share_config_handles_invalid_config(self):
         progress_callback = Mock()
 
-        result = self.storage._process_single_share_config(1, 2, "bad-config", progress_callback)
+        with patch("storage.handle_error_and_notify"):
+            result = self.storage._process_single_share_config(1, 2, "bad-config", progress_callback)
 
         self.assertFalse(result["success"])
         self.assertIn("缺少分享链接", result["error"])
@@ -2074,6 +2097,10 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.assertEqual([], successful_items)
         self.assertEqual(1, len(failed_items))
         self.assertEqual("4", failed_items[0]["error_code"])
+        self.assertEqual("network", failed_items[0]["error_kind"])
+        self.assertTrue(failed_items[0]["retryable"])
+        self.assertTrue(failed_items[0]["temporary"])
+        self.assertIn("failed_at", failed_items[0])
         self.assertEqual(1, failed_items[0]["attempts"])
         self.assertEqual(1, self.storage.client.transfer_shared_paths.call_count)
         sleep.assert_not_called()
@@ -2155,6 +2182,9 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.assertEqual(1, len(failed_items))
         self.assertEqual("a.txt", failed_items[0]["clean_path"])
         self.assertEqual("31066", failed_items[0]["error_code"])
+        self.assertEqual("missing_path", failed_items[0]["error_kind"])
+        self.assertFalse(failed_items[0]["retryable"])
+        self.assertFalse(failed_items[0]["temporary"])
         self.assertEqual(1, failed_items[0]["attempts"])
         self.assertEqual(1, self.storage.client.transfer_shared_paths.call_count)
         sleep.assert_not_called()
@@ -2284,11 +2314,12 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.storage.path_service.ensure_dir_exists.return_value = True
         progress_callback = Mock()
 
-        result = self.storage._rename_transferred_files(
-            [(1, "/save/old", "old/a.txt", "new/a.txt", True)],
-            "/save",
-            progress_callback,
-        )
+        with patch("storage.handle_error_and_notify"):
+            result = self.storage._rename_transferred_files(
+                [(1, "/save/old", "old/a.txt", "new/a.txt", True)],
+                "/save",
+                progress_callback,
+            )
 
         self.assertEqual([], result["transferred_files"])
         self.assertEqual(1, result["rename_failed_count"])
@@ -2364,18 +2395,20 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.assertEqual(2, result["transfer_success_count"])
 
     def test_build_transfer_result_handles_complete_failure(self):
-        result = self.storage._build_transfer_result(
-            0,
-            2,
-            {
-                "transferred_files": [],
-                "rename_failed_files": [],
-                "rename_failed_count": 0,
-                "completed_count": 0,
-            },
-            None,
-        )
+        with patch("storage.handle_error_and_notify") as notify:
+            result = self.storage._build_transfer_result(
+                0,
+                2,
+                {
+                    "transferred_files": [],
+                    "rename_failed_files": [],
+                    "rename_failed_count": 0,
+                    "completed_count": 0,
+                },
+                None,
+            )
 
+        notify.assert_called_once()
         self.assertEqual(
             {
                 "success": False,

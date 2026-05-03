@@ -303,6 +303,9 @@ python transfer_runner.py
 **GitHub Actions 环境：**
 1. 打开仓库的 Settings → Secrets and variables → Actions
 2. 添加对应的 Secret（推荐使用 `save_baidu_cookies.py --repo owner/repo` 自动添加）
+3. 可选添加 `TRANSFERSHARE_STATE_KEY`：用于加密跨 run 持久化失败清单，建议用 `openssl rand -base64 32` 生成
+
+注意：失败清单可能包含分享链接、提取码和文件路径。workflow 只缓存 `.transfershare_failed_transfers.json.enc`；未配置 `TRANSFERSHARE_STATE_KEY` 时会跳过跨 run 状态恢复和保存，不会退回到明文缓存。
 
 ---
 

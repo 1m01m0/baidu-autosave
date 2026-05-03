@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 from collections import Counter
+from dataclasses import dataclass, field
 
 import os
 import posixpath
@@ -73,11 +74,56 @@ STREAM_PRODUCER_JOIN_TIMEOUT = _read_non_negative_float_env(
 )
 
 
-class TransferItem(tuple):
-    def __new__(cls, fs_id, dir_path, clean_path, final_path, need_rename, src_md5=None):
-        obj = super().__new__(cls, (fs_id, dir_path, clean_path, final_path, need_rename))
-        obj.src_md5 = src_md5
-        return obj
+@dataclass(frozen=True, eq=False)
+class TransferItem:
+    fs_id: int
+    dir_path: str
+    clean_path: str
+    final_path: str
+    need_rename: bool
+    src_md5: str = None
+    _payload: tuple = field(init=False, repr=False)
+
+    def __post_init__(self):
+        object.__setattr__(
+            self,
+            "_payload",
+            (
+                self.fs_id,
+                self.dir_path,
+                self.clean_path,
+                self.final_path,
+                self.need_rename,
+            ),
+        )
+
+    def as_tuple(self):
+        return self._payload
+
+    def __iter__(self):
+        return iter(self.as_tuple())
+
+    def __len__(self):
+        return 5
+
+    def __getitem__(self, index):
+        return self.as_tuple()[index]
+
+    def count(self, value):
+        return self.as_tuple().count(value)
+
+    def index(self, value, *args):
+        return self.as_tuple().index(value, *args)
+
+    def __eq__(self, other):
+        if isinstance(other, TransferItem):
+            return self.as_tuple() == other.as_tuple()
+        if isinstance(other, tuple):
+            return self.as_tuple() == other
+        return False
+
+    def __hash__(self):
+        return hash(self.as_tuple())
 
 
 class BaiduStorage:
@@ -891,7 +937,11 @@ class BaiduStorage:
             "need_rename": need_rename,
             "error": error_info.message,
             "error_code": error_info.code,
+            "error_kind": error_info.kind,
+            "retryable": error_info.retryable,
+            "temporary": is_storage_temporary_error_info(error_info),
             "attempts": attempts,
+            "failed_at": int(time.time()),
         }
 
     def _split_existing_transfer_items(

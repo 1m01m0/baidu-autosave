@@ -287,6 +287,9 @@ https://pan.baidu.com/s/1example3?pwd=abcd /我的文件/资料
 |------------|------|--------|
 | **`SAVE_DIR`** | 默认保存目录 | `/AutoTransfer` |
 | **`WECHAT_WEBHOOK`** | 企业微信 Webhook | 无 |
+| **`TRANSFERSHARE_STATE_KEY`** | 加密跨 run 失败清单的密钥；未配置时不持久化历史失败状态 | 无 |
+
+> 失败清单可能包含分享链接、提取码和文件路径。GitHub Actions 只会缓存 `.transfershare_failed_transfers.json.enc`，不会缓存明文失败清单。可用 `openssl rand -base64 32` 生成 `TRANSFERSHARE_STATE_KEY`。
 
 ## ▶️ 使用方法
 

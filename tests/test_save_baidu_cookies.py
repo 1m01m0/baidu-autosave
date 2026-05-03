@@ -79,7 +79,9 @@ class SaveBaiduCookiesTests(unittest.TestCase):
             config_path = Path(temp_dir) / "config.json"
             config_path.write_text('{"cookies": "BDUSS=foo", invalid', encoding="utf-8")
 
-            with patch("save_baidu_cookies.sys.exit", side_effect=SystemExit(1)):
+            with patch("save_baidu_cookies.sys.exit", side_effect=SystemExit(1)), patch(
+                "builtins.print"
+            ):
                 with self.assertRaises(SystemExit) as cm:
                     load_config(config_path)
 
@@ -89,7 +91,9 @@ class SaveBaiduCookiesTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "missing.json"
 
-            with patch("save_baidu_cookies.sys.exit", side_effect=SystemExit(1)):
+            with patch("save_baidu_cookies.sys.exit", side_effect=SystemExit(1)), patch(
+                "builtins.print"
+            ):
                 with self.assertRaises(SystemExit) as cm:
                     load_config(config_path)
 
@@ -116,7 +120,9 @@ class SaveBaiduCookiesTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             env_path = Path(temp_dir) / "missing.env"
 
-            with patch("save_baidu_cookies.sys.exit", side_effect=SystemExit(1)):
+            with patch("save_baidu_cookies.sys.exit", side_effect=SystemExit(1)), patch(
+                "builtins.print"
+            ):
                 with self.assertRaises(SystemExit) as cm:
                     read_env_values(env_path)
 
@@ -125,7 +131,7 @@ class SaveBaiduCookiesTests(unittest.TestCase):
     def test_set_secret_passes_secret_via_stdin_not_argv(self):
         secret = "BDUSS=secret; STOKEN=token"
 
-        with patch("save_baidu_cookies.subprocess.run") as run:
+        with patch("save_baidu_cookies.subprocess.run") as run, patch("builtins.print"):
             set_secret("owner/repo", "BAIDU_COOKIES", secret)
 
         run.assert_called_once()
@@ -140,7 +146,12 @@ class SaveBaiduCookiesTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             env_path = Path(temp_dir) / "baidu_cookies.env"
 
-            write_env_file(env_path, "BDUSS=foo; STOKEN=bar", "BDUSS=foo; STOKEN=bar; PANWEB=baz")
+            with patch("builtins.print"):
+                write_env_file(
+                    env_path,
+                    "BDUSS=foo; STOKEN=bar",
+                    "BDUSS=foo; STOKEN=bar; PANWEB=baz",
+                )
 
             self.assertEqual(0o600, env_path.stat().st_mode & 0o777)
             content = env_path.read_text(encoding="utf-8")

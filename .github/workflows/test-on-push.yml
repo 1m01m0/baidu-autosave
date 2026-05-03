@@ -32,8 +32,8 @@ jobs:
     - name: Build BaiduPCS-Py submodule
       run: |
         ./scripts/build_baidupcs_submodule.sh
-        PYTHONPATH="$PWD/vendor/BaiduPCS-Py" python -c "from baidupcs_py.baidupcs import BaiduPCSApi; print(BaiduPCSApi)"
+        PYTHONPATH="$PWD/vendor/BaiduPCS-Py" python -c "from baidupcs_py.baidupcs import BaiduPCSApi"
 
     - name: Run tests
       run: |
-        python -m unittest discover -s tests -p "test_*.py"
+        python -m unittest discover -s tests -p "test_*.py" -b

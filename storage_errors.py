@@ -21,6 +21,17 @@ _NETWORK_KEYWORDS = (
     "http",
     "ssl",
 )
+_RETRYABLE_ERROR_KINDS = {"network", "rate_limit"}
+_PERMANENT_ERROR_KINDS = {
+    "already_exists",
+    "cookie_invalid",
+    "invalid_name",
+    "missing_path",
+    "retry_abort",
+    "share_forbidden",
+    "share_invalid",
+    "share_password",
+}
 
 
 @dataclass(frozen=True)
@@ -223,6 +234,14 @@ def classify_storage_error(error: ErrorLike) -> StorageErrorInfo:
 
 def parse_share_error(error: ErrorLike) -> str:
     return classify_storage_error(error).message
+
+
+def is_storage_error_kind_retryable(kind: str, default: bool = False) -> bool:
+    if kind in _RETRYABLE_ERROR_KINDS:
+        return True
+    if kind in _PERMANENT_ERROR_KINDS:
+        return False
+    return default
 
 
 def is_network_error(error: ErrorLike) -> bool:

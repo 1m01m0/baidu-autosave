@@ -237,8 +237,134 @@ class TransferRunnerSmokeTests(unittest.TestCase):
         )
 
         self.assertEqual(1, len(records))
+        self.assertEqual(transfer_runner.FAILED_RECORD_SCHEMA_VERSION, records[0]["schema_version"])
         self.assertEqual(3, records[0]["attempts"])
+        self.assertTrue(records[0]["retryable"])
+        self.assertEqual("unknown", records[0]["error_kind"])
         self.assertEqual("a.txt", records[0]["failed_files"][0]["clean_path"])
+        self.assertTrue(records[0]["failed_files"][0]["retryable"])
+
+    def test_build_failed_transfer_records_marks_permanent_storage_errors(self):
+        result = {
+            "results": [
+                {
+                    "retry_config": {"share_url": "https://pan.baidu.com/s/abc12345"},
+                    "transfer_failed_files": [
+                        {"fs_id": 1, "clean_path": "a.txt", "error": "error_code: 31066"}
+                    ],
+                    "error": "error_code: 31066",
+                }
+            ]
+        }
+
+        records = transfer_runner.build_failed_transfer_records(result)
+
+        self.assertEqual(1, len(records))
+        self.assertFalse(records[0]["retryable"])
+        self.assertEqual("missing_path", records[0]["error_kind"])
+        self.assertFalse(records[0]["failed_files"][0]["retryable"])
+
+    def test_split_failed_transfer_records_by_status(self):
+        retryable = {"share_config": {"share_url": "url-1"}, "attempts": 1}
+        deferred = {
+            "share_config": {"share_url": "url-2"},
+            "attempts": 1,
+            "retryable": True,
+            "next_retry_after": 200,
+        }
+        permanent = {
+            "share_config": {"share_url": "url-3"},
+            "attempts": 1,
+            "retryable": False,
+        }
+        exhausted = {
+            "share_config": {"share_url": "url-4"},
+            "attempts": 3,
+            "retryable": True,
+        }
+
+        with patch.object(transfer_runner, "MAX_FAILED_TRANSFER_ATTEMPTS", 3):
+            result = transfer_runner.split_failed_transfer_records_by_status(
+                [retryable, deferred, permanent, exhausted], now=100
+            )
+
+        self.assertEqual(([retryable], [deferred], [permanent], [exhausted]), result)
+
+    def _run_main_with_same_key_history_record(self, history_record, expect_exit=False):
+        history_config = {"share_url": "https://pan.baidu.com/s/old12345", "save_dir": "/old"}
+        history_record = {"share_config": history_config, **history_record}
+        config = {
+            "config_source": "file",
+            "config_path": "config.json",
+            "cookies": "BDUSS=foo; STOKEN=bar",
+            "wechat_webhook": "",
+            "share_urls": [history_config],
+            "share_configs": [history_config],
+        }
+        fake_storage = Mock()
+        fake_storage.is_valid.return_value = True
+        fake_storage.get_quota_info.return_value = None
+        fake_storage.transfer_multiple_shares.return_value = {
+            "success": True,
+            "results": [],
+            "summary": "完成",
+        }
+        fake_logger = Mock()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            failed_path = Path(tmpdir) / "failed.json"
+            transfer_runner.save_failed_transfer_records([history_record], failed_path)
+            with patch.object(transfer_runner, "FAILED_TRANSFERS_FILE", failed_path), patch.object(
+                transfer_runner, "MAX_FAILED_TRANSFER_ATTEMPTS", 3
+            ), patch.object(transfer_runner, "setup_logging"), patch.object(
+                transfer_runner, "get_logger", return_value=fake_logger
+            ), patch.object(transfer_runner, "log_startup"), patch.object(
+                transfer_runner, "log_config_loaded"
+            ), patch.object(transfer_runner, "check_network_connectivity"), patch.object(
+                transfer_runner, "load_runtime_config", return_value=config
+            ), patch.object(
+                transfer_runner, "BaiduStorage", return_value=fake_storage
+            ), patch.object(transfer_runner.sys, "exit", side_effect=SystemExit(1)) as exit_mock, patch.object(
+                transfer_runner, "log_shutdown"
+            ):
+                if expect_exit:
+                    with self.assertRaises(SystemExit):
+                        transfer_runner.main()
+                else:
+                    transfer_runner.main()
+                    exit_mock.assert_not_called()
+
+            return failed_path.exists(), fake_storage.transfer_multiple_shares.call_count
+
+    def test_main_keeps_deferred_history_record_without_current_retry(self):
+        path_exists, call_count = self._run_main_with_same_key_history_record(
+            {
+                "failed_files": [{"clean_path": "a.txt"}],
+                "attempts": 1,
+                "retryable": True,
+                "next_retry_after": 9999999999,
+            },
+            expect_exit=True,
+        )
+
+        self.assertTrue(path_exists)
+        self.assertEqual(0, call_count)
+
+    def test_main_drops_exhausted_history_record_without_current_retry(self):
+        path_exists, call_count = self._run_main_with_same_key_history_record(
+            {"failed_files": [{"clean_path": "a.txt"}], "attempts": 3, "retryable": True}
+        )
+
+        self.assertFalse(path_exists)
+        self.assertEqual(0, call_count)
+
+    def test_main_drops_permanent_history_record_without_current_retry(self):
+        path_exists, call_count = self._run_main_with_same_key_history_record(
+            {"failed_files": [{"clean_path": "a.txt"}], "attempts": 1, "retryable": False}
+        )
+
+        self.assertFalse(path_exists)
+        self.assertEqual(0, call_count)
 
     def test_main_retries_history_failures_and_clears_file(self):
         config = {
@@ -344,6 +470,118 @@ class TransferRunnerSmokeTests(unittest.TestCase):
         )
         self.assertFalse(
             any("1a2B" in str(call.args) for call in fake_logger.warning.call_args_list)
+        )
+
+    def test_main_skips_permanent_history_records(self):
+        config = {
+            "config_source": "file",
+            "config_path": "config.json",
+            "cookies": "BDUSS=foo; STOKEN=bar",
+            "wechat_webhook": "",
+            "share_urls": [{"share_url": "https://pan.baidu.com/s/new12345", "save_dir": "/AutoTransfer"}],
+            "share_configs": [{"share_url": "https://pan.baidu.com/s/new12345", "save_dir": "/AutoTransfer"}],
+        }
+        history_config = {"share_url": "https://pan.baidu.com/s/old12345", "save_dir": "/old"}
+        fake_storage = Mock()
+        fake_storage.is_valid.return_value = True
+        fake_storage.get_quota_info.return_value = None
+        fake_storage.transfer_multiple_shares.return_value = {
+            "success": True,
+            "results": [],
+            "summary": "完成",
+        }
+        fake_logger = Mock()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            failed_path = Path(tmpdir) / "failed.json"
+            transfer_runner.save_failed_transfer_records(
+                [
+                    {
+                        "share_config": history_config,
+                        "failed_files": [{"clean_path": "bad.txt", "retryable": False}],
+                        "attempts": 1,
+                        "retryable": False,
+                    }
+                ],
+                failed_path,
+            )
+            with patch.object(transfer_runner, "FAILED_TRANSFERS_FILE", failed_path), patch.object(
+                transfer_runner, "setup_logging"
+            ), patch.object(transfer_runner, "get_logger", return_value=fake_logger), patch.object(
+                transfer_runner, "log_startup"
+            ), patch.object(transfer_runner, "log_config_loaded"), patch.object(
+                transfer_runner, "check_network_connectivity"
+            ), patch.object(transfer_runner, "load_runtime_config", return_value=config), patch.object(
+                transfer_runner, "BaiduStorage", return_value=fake_storage
+            ), patch.object(transfer_runner, "log_shutdown"):
+                transfer_runner.main()
+
+            self.assertFalse(failed_path.exists())
+
+        fake_storage.transfer_multiple_shares.assert_called_once_with(
+            share_configs=config["share_configs"],
+            progress_callback=transfer_runner.progress_callback,
+        )
+        self.assertTrue(
+            any("不可自动恢复" in call.args[0] for call in fake_logger.warning.call_args_list)
+        )
+
+    def test_main_does_not_reset_attempts_when_history_key_matches_current_config(self):
+        config = {
+            "config_source": "file",
+            "config_path": "config.json",
+            "cookies": "BDUSS=foo; STOKEN=bar",
+            "wechat_webhook": "",
+            "share_urls": [{"share_url": "https://pan.baidu.com/s/old12345", "save_dir": "/old"}],
+            "share_configs": [{"share_url": "https://pan.baidu.com/s/old12345", "save_dir": "/old"}],
+        }
+        history_config = config["share_configs"][0]
+        retry_result = {
+            "success": False,
+            "partial": True,
+            "results": [
+                {
+                    "success": False,
+                    "partial": True,
+                    "retry_config": history_config,
+                    "transfer_failed_files": [{"clean_path": "a.txt", "error": "boom"}],
+                    "error": "boom",
+                }
+            ],
+        }
+        fake_storage = Mock()
+        fake_storage.is_valid.return_value = True
+        fake_storage.get_quota_info.return_value = None
+        fake_storage.transfer_multiple_shares.return_value = retry_result
+        fake_logger = Mock()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            failed_path = Path(tmpdir) / "failed.json"
+            transfer_runner.save_failed_transfer_records(
+                [{"share_config": history_config, "failed_files": [], "attempts": 2}],
+                failed_path,
+            )
+            with patch.object(transfer_runner, "FAILED_TRANSFERS_FILE", failed_path), patch.object(
+                transfer_runner, "MAX_FAILED_TRANSFER_ATTEMPTS", 3
+            ), patch.object(transfer_runner, "setup_logging"), patch.object(
+                transfer_runner, "get_logger", return_value=fake_logger
+            ), patch.object(transfer_runner, "log_startup"), patch.object(
+                transfer_runner, "log_config_loaded"
+            ), patch.object(transfer_runner, "check_network_connectivity"), patch.object(
+                transfer_runner, "load_runtime_config", return_value=config
+            ), patch.object(
+                transfer_runner, "BaiduStorage", return_value=fake_storage
+            ), patch.object(transfer_runner, "log_shutdown"):
+                transfer_runner.main()
+
+            self.assertFalse(failed_path.exists())
+
+        fake_storage.transfer_multiple_shares.assert_called_once_with(
+            share_configs=[history_config],
+            progress_callback=transfer_runner.progress_callback,
+        )
+        self.assertTrue(
+            any("避免同一 run 重复转存" in call.args[0] for call in fake_logger.info.call_args_list)
         )
 
     def test_main_drops_history_record_after_retry_reaches_attempt_limit(self):

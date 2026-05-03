@@ -33,14 +33,47 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    - name: Build BaiduPCS-Py submodule
+    - name: Check encrypted failed state key
+      id: failed_state
+      env:
+        TRANSFERSHARE_STATE_KEY: ${{ secrets.TRANSFERSHARE_STATE_KEY }}
       run: |
-        ./scripts/build_baidupcs_submodule.sh
-        PYTHONPATH="$PWD/vendor/BaiduPCS-Py" python -c "from baidupcs_py.baidupcs import BaiduPCSApi; print(BaiduPCSApi)"
+        if [ -n "$TRANSFERSHARE_STATE_KEY" ]; then
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "enabled=false" >> "$GITHUB_OUTPUT"
+          echo "TRANSFERSHARE_STATE_KEY 未配置，跳过跨 run 失败清单持久化"
+        fi
 
-    - name: Run tests
+    - name: Restore encrypted failed state
+      if: steps.failed_state.outputs.enabled == 'true'
+      uses: actions/cache/restore@v4
+      with:
+        path: .transfershare_failed_transfers.json.enc
+        key: transfershare-failed-state-${{ github.ref_name }}-${{ github.run_id }}
+        restore-keys: |
+          transfershare-failed-state-${{ github.ref_name }}-
+
+    - name: Decrypt failed state
+      if: steps.failed_state.outputs.enabled == 'true' && hashFiles('.transfershare_failed_transfers.json.enc') != ''
+      env:
+        TRANSFERSHARE_STATE_KEY: ${{ secrets.TRANSFERSHARE_STATE_KEY }}
       run: |
-        python -m unittest discover -s tests -p "test_*.py"
+        set -euo pipefail
+        key_file="$(mktemp)"
+        trap 'rm -f "$key_file"' EXIT
+        printf '%s' "$TRANSFERSHARE_STATE_KEY" > "$key_file"
+        chmod 600 "$key_file"
+        if openssl enc -d -aes-256-cbc -pbkdf2 \
+          -in .transfershare_failed_transfers.json.enc \
+          -out .transfershare_failed_transfers.json \
+          -pass file:"$key_file"; then
+          chmod 600 .transfershare_failed_transfers.json
+          echo "已恢复加密失败清单"
+        else
+          rm -f .transfershare_failed_transfers.json
+          echo "无法解密失败清单，跳过历史状态"
+        fi
 
     - name: Run transfer task (First attempt)
       id: first_attempt
@@ -55,7 +88,7 @@ jobs:
         echo "开始执行转存任务 (第一次尝试)"
         echo "超时时间: 7 分钟"
         echo "========================================"
-        ./scripts/run_transfer_task.sh --show-network-info
+        ./scripts/run_transfer_task.sh
 
     - name: Run transfer task (Second attempt)
       if: steps.first_attempt.outcome == 'failure'
@@ -72,3 +105,36 @@ jobs:
         sleep 5
         ./scripts/run_transfer_task.sh
 
+    - name: Encrypt failed state
+      if: always() && steps.failed_state.outputs.enabled == 'true'
+      env:
+        TRANSFERSHARE_STATE_KEY: ${{ secrets.TRANSFERSHARE_STATE_KEY }}
+      run: |
+        set -euo pipefail
+        key_file="$(mktemp)"
+        state_file=".transfershare_failed_transfers.json"
+        encrypted_file=".transfershare_failed_transfers.json.enc"
+        tmp_state="$(mktemp)"
+        tmp_encrypted="$(mktemp)"
+        trap 'rm -f "$key_file" "$tmp_state" "$tmp_encrypted"' EXIT
+        printf '%s' "$TRANSFERSHARE_STATE_KEY" > "$key_file"
+        chmod 600 "$key_file"
+        if [ -s "$state_file" ]; then
+          cp "$state_file" "$tmp_state"
+        else
+          printf '[]\n' > "$tmp_state"
+        fi
+        openssl enc -aes-256-cbc -salt -pbkdf2 \
+          -in "$tmp_state" \
+          -out "$tmp_encrypted" \
+          -pass file:"$key_file"
+        mv "$tmp_encrypted" "$encrypted_file"
+        chmod 600 "$encrypted_file"
+        rm -f "$state_file"
+
+    - name: Save encrypted failed state
+      if: always() && steps.failed_state.outputs.enabled == 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: .transfershare_failed_transfers.json.enc
+        key: transfershare-failed-state-${{ github.ref_name }}-${{ github.run_id }}

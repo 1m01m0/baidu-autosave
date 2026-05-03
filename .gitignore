@@ -65,4 +65,6 @@ config.json.bak-*
 .gitignore.bak-*
 .transfershare_failed_transfers.json
 .transfershare_failed_transfers.json.tmp
+.transfershare_failed_transfers.json.enc
+.transfershare_failed_transfers.json.enc.tmp
 .omc/

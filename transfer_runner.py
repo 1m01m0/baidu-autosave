@@ -4,10 +4,16 @@
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from storage import BaiduStorage
 from wechat_notifier import WeChatNotifier
 from utils import handle_error_and_notify, collect_transferred_files, mask_share_url, mask_sensitive
+from storage_errors import (
+    classify_storage_error,
+    is_storage_error_kind_retryable,
+    is_storage_temporary_error_info,
+)
 from logger import (
     get_logger,
     setup_logging,
@@ -37,6 +43,8 @@ def _read_positive_int_env(name, default):
 MAX_FAILED_TRANSFER_ATTEMPTS = _read_positive_int_env(
     "TRANSFERSHARE_MAX_FAILED_TRANSFER_ATTEMPTS", 3
 )
+FAILED_RECORD_SCHEMA_VERSION = 2
+TEMPORARY_FAILED_RETRY_DELAY_SECONDS = 6 * 60 * 60
 
 
 def load_failed_transfer_records(path=None):
@@ -79,6 +87,10 @@ def save_failed_transfer_records(records, path=None):
     os.replace(tmp_path, path)
 
 
+def _current_timestamp():
+    return int(time.time())
+
+
 def _record_attempts(records):
     attempts = {}
     for record in records or []:
@@ -90,6 +102,81 @@ def _record_attempts(records):
     return attempts
 
 
+def _records_by_config_key(records):
+    keyed_records = {}
+    for record in records or []:
+        config = record.get("share_config") or {}
+        if config.get("share_url"):
+            keyed_records[retry_share_config_key(config)] = record
+    return keyed_records
+
+
+def _failed_record_keys(records):
+    return set(_records_by_config_key(records).keys())
+
+
+def _filter_current_share_configs(share_configs, skipped_keys):
+    current_configs = []
+    skipped_count = 0
+    for share_config in share_configs or []:
+        if retry_share_config_key(share_config) in skipped_keys:
+            skipped_count += 1
+        else:
+            current_configs.append(share_config)
+    return current_configs, skipped_count
+
+
+def _build_no_current_share_result():
+    return {
+        "success": True,
+        "skipped": True,
+        "summary": "没有新的分享任务需要执行",
+        "message": "没有新的分享任务需要执行",
+        "results": [],
+    }
+
+
+def _coerce_bool(value, default):
+    return value if isinstance(value, bool) else default
+
+
+def _default_retryable_for_error(error_info):
+    if error_info.kind == "unknown":
+        return True
+    return error_info.retryable
+
+
+def _normalize_failed_file(failed_file, fallback_error, now):
+    detail = dict(failed_file)
+    error_text = detail.get("error") or fallback_error or ""
+    error_info = classify_storage_error(error_text)
+    error_kind = detail.get("error_kind") or error_info.kind
+    retryable_default = is_storage_error_kind_retryable(
+        error_kind, _default_retryable_for_error(error_info)
+    )
+    retryable = _coerce_bool(detail.get("retryable"), retryable_default)
+    temporary = _coerce_bool(
+        detail.get("temporary"), is_storage_temporary_error_info(error_info)
+    )
+
+    detail["error_kind"] = error_kind
+    detail["retryable"] = retryable
+    detail["temporary"] = temporary
+    detail.setdefault("failed_at", now)
+    return detail
+
+
+def _normalize_failed_files(failed_files, fallback_error, now):
+    normalized = []
+    for failed_file in failed_files or []:
+        if not isinstance(failed_file, dict):
+            continue
+        normalized.append(_normalize_failed_file(failed_file, fallback_error, now))
+        if len(normalized) >= MAX_FAILED_FILES_PER_RECORD:
+            break
+    return normalized
+
+
 def _trim_failed_record(record):
     trimmed = dict(record)
     trimmed["failed_files"] = list(trimmed.get("failed_files", []))[:MAX_FAILED_FILES_PER_RECORD]
@@ -98,24 +185,40 @@ def _trim_failed_record(record):
 
 def build_failed_transfer_records(result, previous_records=None, increment_attempts=False):
     previous_attempts = _record_attempts(previous_records)
+    previous_by_key = _records_by_config_key(previous_records)
     records = []
+    now = _current_timestamp()
     result_items = result.get("results") if isinstance(result, dict) else []
     for item in result_items or []:
+        if not isinstance(item, dict):
+            continue
         retry_config = item.get("retry_config")
         failed_files = item.get("transfer_failed_files", [])
         if not retry_config or not failed_files:
             continue
         key = retry_share_config_key(retry_config)
-        records.append(
-            _trim_failed_record(
-                {
-                    "share_config": retry_config,
-                    "failed_files": failed_files,
-                    "error": item.get("error") or item.get("message") or "转存失败",
-                    "attempts": previous_attempts.get(key, 0) + (1 if increment_attempts else 0),
-                }
-            )
-        )
+        error_text = item.get("error") or item.get("message") or "转存失败"
+        normalized_failed_files = _normalize_failed_files(failed_files, error_text, now)
+        if not normalized_failed_files:
+            continue
+        retryable = any(file.get("retryable") for file in normalized_failed_files)
+        temporary = any(file.get("temporary") for file in normalized_failed_files)
+        previous_record = previous_by_key.get(key, {})
+        record = {
+            "schema_version": FAILED_RECORD_SCHEMA_VERSION,
+            "share_config": retry_config,
+            "failed_files": normalized_failed_files,
+            "error": error_text,
+            "error_kind": normalized_failed_files[0].get("error_kind", "unknown"),
+            "retryable": retryable,
+            "temporary": temporary,
+            "failed_at": previous_record.get("failed_at", now),
+            "last_failed_at": now,
+            "attempts": previous_attempts.get(key, 0) + (1 if increment_attempts else 0),
+        }
+        if retryable and temporary:
+            record["next_retry_after"] = now + TEMPORARY_FAILED_RETRY_DELAY_SECONDS
+        records.append(_trim_failed_record(record))
     return records
 
 
@@ -136,15 +239,51 @@ def _failed_record_attempts(record):
         return 0
 
 
-def split_failed_transfer_records_by_attempts(records):
+def _failed_record_retryable(record):
+    if "retryable" in record:
+        return _coerce_bool(record.get("retryable"), True)
+    failed_files = record.get("failed_files", [])
+    if isinstance(failed_files, list) and failed_files:
+        explicit_values = [
+            item.get("retryable")
+            for item in failed_files
+            if isinstance(item, dict) and "retryable" in item
+        ]
+        if explicit_values:
+            return any(_coerce_bool(value, True) for value in explicit_values)
+    return True
+
+
+def _failed_record_next_retry_after(record):
+    try:
+        return int(record.get("next_retry_after") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def split_failed_transfer_records_by_status(records, now=None):
+    now = _current_timestamp() if now is None else int(now)
     retryable_records = []
+    deferred_records = []
+    permanent_records = []
     exhausted_records = []
     for record in records or []:
-        if _failed_record_attempts(record) >= MAX_FAILED_TRANSFER_ATTEMPTS:
+        if not _failed_record_retryable(record):
+            permanent_records.append(record)
+        elif _failed_record_attempts(record) >= MAX_FAILED_TRANSFER_ATTEMPTS:
             exhausted_records.append(record)
+        elif _failed_record_next_retry_after(record) > now:
+            deferred_records.append(record)
         else:
             retryable_records.append(record)
-    return retryable_records, exhausted_records
+    return retryable_records, deferred_records, permanent_records, exhausted_records
+
+
+def split_failed_transfer_records_by_attempts(records):
+    retryable_records, deferred_records, permanent_records, exhausted_records = (
+        split_failed_transfer_records_by_status(records)
+    )
+    return retryable_records + deferred_records + permanent_records, exhausted_records
 
 
 def log_exhausted_failed_records(logger, records, reason):
@@ -157,6 +296,18 @@ def log_exhausted_failed_records(logger, records, reason):
     log_transfer_failed_files(logger, _failed_records_to_files(records))
 
 
+def log_permanent_failed_records(logger, records, reason):
+    if not records:
+        return
+    logger.warning(f"{reason}: {len(records)} 个分享任务不可自动恢复，不再自动重试")
+    log_transfer_failed_files(logger, _failed_records_to_files(records))
+
+
+def log_deferred_failed_records(logger, records, reason):
+    if records:
+        logger.info(f"{reason}: {len(records)} 个分享任务暂未到下次重试时间")
+
+
 def _failed_records_to_files(records):
     files = []
     for record in records or []:
@@ -166,6 +317,8 @@ def _failed_records_to_files(records):
             detail = dict(failed_file)
             detail.setdefault("share_url", masked_share_url)
             detail.setdefault("save_dir", config.get("save_dir"))
+            detail.setdefault("error", record.get("error"))
+            detail.setdefault("error_kind", record.get("error_kind"))
             files.append(detail)
     return files
 
@@ -224,6 +377,67 @@ def attach_failed_records_to_result(result, records):
         result["error"] = f"{base_message}；{suffix}"
         result["message"] = result["error"]
     return result
+
+
+def retry_history_failed_records(storage, logger, failed_records):
+    remaining_failed_records = []
+    (
+        retryable_failed_records,
+        deferred_failed_records,
+        permanent_failed_records,
+        exhausted_failed_records,
+    ) = split_failed_transfer_records_by_status(failed_records)
+    remaining_failed_records.extend(deferred_failed_records)
+    log_deferred_failed_records(logger, deferred_failed_records, "历史失败清单")
+    log_permanent_failed_records(logger, permanent_failed_records, "历史失败清单")
+    log_exhausted_failed_records(logger, exhausted_failed_records, "历史失败清单")
+    if not retryable_failed_records:
+        return remaining_failed_records
+
+    logger.info(f"发现历史失败清单，先重试 {len(retryable_failed_records)} 个分享任务")
+    retry_result = storage.transfer_multiple_shares(
+        share_configs=[record["share_config"] for record in retryable_failed_records],
+        progress_callback=progress_callback,
+    )
+    retry_failed_records = build_failed_transfer_records(
+        retry_result, retryable_failed_records, increment_attempts=True
+    )
+    (
+        retry_remaining_records,
+        retry_deferred_records,
+        retry_permanent_records,
+        retry_exhausted_records,
+    ) = split_failed_transfer_records_by_status(retry_failed_records)
+    remaining_failed_records = merge_failed_transfer_records(
+        remaining_failed_records, retry_remaining_records, retry_deferred_records
+    )
+    log_permanent_failed_records(logger, retry_permanent_records, "历史失败清单重试后")
+    log_exhausted_failed_records(logger, retry_exhausted_records, "历史失败清单重试后")
+    if remaining_failed_records:
+        logger.warning(f"历史失败清单仍有 {len(remaining_failed_records)} 个分享任务未完成")
+    elif retry_failed_records:
+        logger.info("历史失败清单已不再需要写回")
+    else:
+        logger.info("历史失败清单已全部重试成功")
+    return remaining_failed_records
+
+
+def run_current_transfer(storage, logger, config, failed_records):
+    current_share_configs, skipped_current_count = _filter_current_share_configs(
+        config["share_configs"], _failed_record_keys(failed_records)
+    )
+    if skipped_current_count:
+        logger.info(
+            f"跳过 {skipped_current_count} 个已由历史失败清单处理的分享任务，避免同一 run 重复转存"
+        )
+
+    logger.info("开始执行批量转存任务...")
+    if not current_share_configs:
+        return _build_no_current_share_result()
+    return storage.transfer_multiple_shares(
+        share_configs=current_share_configs,
+        progress_callback=progress_callback,
+    )
 
 
 def check_network_connectivity():
@@ -369,47 +583,25 @@ def main():
             failed_records = []
             failed_records_load_error = True
             logger.warning(f"读取历史失败清单失败，保留原文件不覆盖: {exc}")
-        remaining_failed_records = []
-        retryable_failed_records, exhausted_failed_records = split_failed_transfer_records_by_attempts(
-            failed_records
+        remaining_failed_records = retry_history_failed_records(
+            storage, logger, failed_records
         )
-        log_exhausted_failed_records(logger, exhausted_failed_records, "历史失败清单")
-        if retryable_failed_records:
-            logger.info(
-                f"发现历史失败清单，先重试 {len(retryable_failed_records)} 个分享任务"
-            )
-            retry_result = storage.transfer_multiple_shares(
-                share_configs=[record["share_config"] for record in retryable_failed_records],
-                progress_callback=progress_callback,
-            )
-            retry_failed_records = build_failed_transfer_records(
-                retry_result, retryable_failed_records, increment_attempts=True
-            )
-            remaining_failed_records, retry_exhausted_records = split_failed_transfer_records_by_attempts(
-                retry_failed_records
-            )
-            log_exhausted_failed_records(
-                logger, retry_exhausted_records, "历史失败清单重试后"
-            )
-            if remaining_failed_records:
-                logger.warning(
-                    f"历史失败清单仍有 {len(remaining_failed_records)} 个分享任务未完成"
-                )
-            elif retry_failed_records:
-                logger.info("历史失败清单已达到重试上限，不再写回")
-            else:
-                logger.info("历史失败清单已全部重试成功")
-
-        logger.info("开始执行批量转存任务...")
-        result = storage.transfer_multiple_shares(
-            share_configs=config["share_configs"],
-            progress_callback=progress_callback,
+        result = run_current_transfer(storage, logger, config, failed_records)
+        new_failed_records = build_failed_transfer_records(
+            result, failed_records, increment_attempts=True
         )
-        new_failed_records = build_failed_transfer_records(result)
+        (
+            new_retryable_records,
+            new_deferred_records,
+            new_permanent_records,
+            new_exhausted_records,
+        ) = split_failed_transfer_records_by_status(new_failed_records)
+        log_permanent_failed_records(logger, new_permanent_records, "本次失败清单")
+        log_exhausted_failed_records(logger, new_exhausted_records, "本次失败清单")
         if remaining_failed_records:
             result = attach_failed_records_to_result(result, remaining_failed_records)
         all_failed_records = merge_failed_transfer_records(
-            remaining_failed_records, new_failed_records
+            remaining_failed_records, new_retryable_records, new_deferred_records
         )
         if failed_records_load_error:
             if all_failed_records:
