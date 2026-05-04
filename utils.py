@@ -409,25 +409,37 @@ def mask(
 
 # 预编译 Cookie 掩码正则表达式
 _COOKIE_KEYS = [
-    "BDUSS",
-    "STOKEN",
     "BDUSS_BFESS",
     "STOKEN_BFESS",
+    "BAIDUID_BFESS",
+    "BDUSS",
+    "STOKEN",
     "BDCLND",
     "BAIDUID",
+    "PANWEB",
+    "H_PS_PSSID",
+    "BDORZ",
+    "BDRCVFR",
+    "PTOKEN",
+    "PANPSC",
+    "BA_HECTOR",
+    "ZFY",
 ]
 _COOKIE_PATTERNS: List[re.Pattern[str]] = []
 for key in _COOKIE_KEYS:
-    # 匹配 KEY=任意非分号字符; 或 KEY="..."
-    _COOKIE_PATTERNS.append(re.compile(rf"({key}\s*=\s*)[^;\"]+"))
-    _COOKIE_PATTERNS.append(re.compile(rf'({key}\s*=\s*")[^"]*(")'))
+    _COOKIE_PATTERNS.append(
+        re.compile(
+            rf"((?:['\"]?{key}['\"]?)\s*[:=]\s*['\"]?)([^;,'\"\s}}{{\]]+)(['\"]?)",
+            re.IGNORECASE,
+        )
+    )
 
 
 def mask_cookies(text: Optional[str]) -> Optional[str]:
     """
     针对常见 Cookie 键的掩码（仅隐藏值，不改变原格式）。
 
-    支持：BDUSS、STOKEN、BDUSS_BFESS、STOKEN_BFESS、BDCLND、BAIDUID
+    支持常见百度 Cookie，包含 KEY=value、JSON/dict 和冒号格式。
 
     Args:
         text: 原始文本
@@ -439,9 +451,7 @@ def mask_cookies(text: Optional[str]) -> Optional[str]:
         return text
 
     def repl(match: re.Match[str]) -> str:
-        if match.lastindex == 2:
-            return f"{match.group(1)}{MASK_REPLACEMENT}{match.group(2)}"
-        return f"{match.group(1)}{MASK_REPLACEMENT}"
+        return f"{match.group(1)}{MASK_REPLACEMENT}{match.group(3)}"
 
     masked = str(text)
     for pattern in _COOKIE_PATTERNS:

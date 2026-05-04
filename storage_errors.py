@@ -75,7 +75,7 @@ def _match_error_code(text: str) -> Optional[str]:
 
 def _contains_cookie_marker(text: str) -> bool:
     lowered = text.lower()
-    return "bduss" in text or "stoken" in text or "cookie" in lowered
+    return "bduss" in lowered or "stoken" in lowered or "cookie" in lowered
 
 
 def classify_storage_error(error: ErrorLike) -> StorageErrorInfo:
@@ -242,10 +242,6 @@ def is_storage_error_kind_retryable(kind: str, default: bool = False) -> bool:
     if kind in _PERMANENT_ERROR_KINDS:
         return False
     return default
-
-
-def is_network_error(error: ErrorLike) -> bool:
-    return classify_storage_error(error).kind == "network"
 
 
 def is_rate_limit_error(error: ErrorLike) -> bool:

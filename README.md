@@ -75,6 +75,9 @@ pip install -r requirements.txt
 最小测试集基于 Python 标准库 `unittest`，不依赖 `pytest`。
 
 ```bash
+# 安装测试依赖
+pip install -r requirements-test.txt
+
 # 运行全部测试
 python -m unittest discover -s tests -p "test_*.py"
 
@@ -295,7 +298,15 @@ https://pan.baidu.com/s/1example3?pwd=abcd /我的文件/资料
 
 ### 自动执行
 
-工作流会每六小时自动运行一次（UTC 时间的 0:17、6:17、12:17、18:17）。
+工作流会每六小时自动运行一次（UTC 时间的 0:17、6:17、12:17、18:17，即每 6 小时的第 17 分钟）。
+
+GitHub Actions 运维与安全说明：
+- 转存 workflow 配置了并发锁，同一分支的新转存不会取消正在运行的任务，避免同时写入失败清单和目标目录状态。
+- checkout 使用 `persist-credentials: false`，workflow 只授予 `permissions: contents: read`。
+- 测试 workflow 使用 `actionlint` 校验 Actions 语法，并在 Python 3.9 到 Python 3.12 的 matrix 上运行单测。
+- 定时转存脚本第一次运行超时为 7 分钟，失败后等待 5 秒重试，第二次运行超时为 10 分钟。
+- 失败清单只通过 `.transfershare_failed_transfers.json.enc` 加密缓存；未配置 `TRANSFERSHARE_STATE_KEY` 时不跨 run 保存或恢复历史失败状态。
+- Cookie 输出默认脱敏，`--show-full-cookie` 只建议在可信本地终端临时排查时使用。
 
 ### 手动执行
 

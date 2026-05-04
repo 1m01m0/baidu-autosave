@@ -5,6 +5,7 @@ import json
 import os
 import re
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit, urlunsplit
 from typing import Any, Dict, List, Mapping, Optional, Union
 
 DEFAULT_SAVE_DIR = "/AutoTransfer"
@@ -17,7 +18,12 @@ RETRY_SHARE_CONFIG_KEYS = (
     "folder_filter",
     "exclude_folder_filter",
 )
-_SHARE_URL_PATTERN = re.compile(r"https://pan\.baidu\.com/s/[A-Za-z0-9_-]+")
+_SHARE_URL_PATTERN = re.compile(
+    r"https://pan\.baidu\.com/s/[A-Za-z0-9_-]+(?:\?[^\s]+)?",
+    re.IGNORECASE,
+)
+_SHARE_PATH_PATTERN = re.compile(r"/s/[A-Za-z0-9_-]+")
+_PWD_VALUE_PATTERN = re.compile(r"[A-Za-z0-9]{4}")
 _PWD_INLINE_PATTERN = re.compile(
     r"(?:\bpwd\b|密码|提取码)[:：]?\s*([A-Za-z0-9]{4})", re.IGNORECASE
 )
@@ -38,6 +44,47 @@ def retry_share_config_key(config: Dict[str, Any]) -> str:
         sort_keys=True,
         default=str,
     )
+
+
+def _parse_share_url(value: Any, require_full: bool = False) -> Optional[Dict[str, Any]]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    match = _SHARE_URL_PATTERN.fullmatch(text) if require_full else _SHARE_URL_PATTERN.search(text)
+    if not match:
+        return None
+
+    raw_url = match.group(0)
+    parsed = urlsplit(raw_url)
+    path = parsed.path.rstrip("/")
+    if parsed.scheme.lower() != "https" or parsed.netloc.lower() != "pan.baidu.com":
+        return None
+    if not _SHARE_PATH_PATTERN.fullmatch(path):
+        return None
+
+    pwd_values = parse_qs(parsed.query, keep_blank_values=True).get("pwd", [])
+    pwd = pwd_values[0] if pwd_values else None
+    if pwd not in (None, "") and not _PWD_VALUE_PATTERN.fullmatch(pwd):
+        raise ValueError("提取码必须是 4 位字母或数字")
+
+    return {
+        "share_url": urlunsplit(("https", "pan.baidu.com", path, "", "")),
+        "pwd": pwd or None,
+        "match": match,
+    }
+
+
+def _normalize_share_object(item: Dict[str, Any]) -> Dict[str, Any]:
+    share_config = dict(item)
+    try:
+        parsed = _parse_share_url(share_config.get("share_url"), require_full=True)
+    except ValueError:
+        return share_config
+    if parsed:
+        share_config["share_url"] = parsed["share_url"]
+        if parsed.get("pwd") and not share_config.get("pwd"):
+            share_config["pwd"] = parsed["pwd"]
+    return share_config
 
 
 def resolve_config_path(config_path: Union[Path, str] = "config.json") -> Path:
@@ -94,20 +141,17 @@ def parse_share_links_from_text(text: str, default_save_dir: Optional[str] = Non
         if not line:
             continue
 
-        match = _SHARE_URL_PATTERN.search(line)
-        if not match:
+        try:
+            parsed = _parse_share_url(line)
+        except ValueError:
+            continue
+        if not parsed:
             continue
 
-        share_url = match.group(0)
-        pwd = None
+        match = parsed["match"]
+        share_url = parsed["share_url"]
+        pwd = parsed.get("pwd")
         save_dir = None
-
-        if "?pwd=" in line[match.start() :]:
-            try:
-                _, pwd_part = line[match.start() :].split("?pwd=", 1)
-                pwd = pwd_part[:4]
-            except Exception:
-                pwd = None
 
         if not pwd:
             remain = line[match.end() :]
@@ -157,8 +201,16 @@ def _serialize_share_config(
     if not share_url:
         raise ValueError("share_urls 中存在缺少 share_url 的对象配置")
 
+    try:
+        parsed = _parse_share_url(share_url, require_full=True)
+    except ValueError:
+        parsed = None
     pwd = str(share_config.get("pwd") or "").strip()
-    if pwd and "?pwd=" not in share_url:
+    if parsed:
+        share_url = parsed["share_url"]
+        if not pwd and parsed.get("pwd"):
+            pwd = parsed["pwd"]
+    if pwd:
         share_url = f"{share_url}?pwd={pwd}"
 
     save_dir = share_config.get("save_dir") or default_save_dir
@@ -171,7 +223,7 @@ def _normalize_share_list_item(
     item: Any, default_save_dir: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     if isinstance(item, dict):
-        return [dict(item)]
+        return [_normalize_share_object(item)]
     if isinstance(item, str) and item.strip():
         return parse_share_links_from_text(item.strip(), default_save_dir)
     return []
@@ -386,6 +438,8 @@ def _validate_regex_replace_config(
             f"❌ {field_name} 类型错误，应为字符串，当前类型: {type(value).__name__}"
         )
         return
+    if re.search(r"\$[1-9]\d*", value):
+        warnings.append(f"⚠️  {label}使用 Python re.sub() 语法，请用 \\1、\\2 表示分组引用")
     if isinstance(regex_pattern, str):
         try:
             re.sub(regex_pattern, value, "test_file.mp4")
@@ -405,14 +459,20 @@ def _validate_share_object_config(
     share_url = item.get("share_url")
     if not isinstance(share_url, str) or not share_url.strip():
         errors.append(f"❌ {prefix}缺少 share_url 字段或类型错误")
-    elif not _SHARE_URL_PATTERN.search(share_url.strip()):
-        errors.append(f"❌ {prefix}格式不正确: {share_url[:50]}...")
+    else:
+        try:
+            parsed_share_url = _parse_share_url(share_url, require_full=True)
+        except ValueError as exc:
+            errors.append(f"❌ {prefix}格式不正确: {exc}")
+        else:
+            if not parsed_share_url:
+                errors.append(f"❌ {prefix}格式不正确: {share_url[:50]}...")
 
     pwd = item.get("pwd")
     if pwd not in (None, ""):
         if not isinstance(pwd, str):
             errors.append(f"❌ {prefix}的 pwd 必须是字符串，当前类型: {type(pwd).__name__}")
-        elif not re.fullmatch(r"[A-Za-z0-9]{4}", pwd):
+        elif not _PWD_VALUE_PATTERN.fullmatch(pwd):
             errors.append(f"❌ {prefix}的 pwd 必须是 4 位字母或数字")
 
     save_dir = item.get("save_dir")

@@ -779,12 +779,52 @@ class BaiduStorage:
             return f"{prefix}已存在,但内容不同(md5不同),跳过： {path}"
         return f"{prefix}已存在,但缺少MD5无法确认是否相同,跳过： {path}"
 
+    def _transfer_item_local_entries(self, item):
+        _, _, clean_path, final_path, need_rename = item
+        src_md5 = getattr(item, "src_md5", None)
+        entries = []
+        clean_normalized = self.path_service.normalize_path(str(clean_path or "").lstrip("/"))
+        if clean_normalized:
+            entries.append((clean_normalized, src_md5))
+        final_normalized = self.path_service.normalize_path(str(final_path or "").lstrip("/"))
+        if need_rename and final_normalized and final_normalized != clean_normalized:
+            entries.append((final_normalized, src_md5))
+        return entries
+
+    def _record_transfer_item_paths(self, item, local_files_dict):
+        for normalized_path, src_md5 in self._transfer_item_local_entries(item):
+            local_files_dict[normalized_path] = src_md5
+
+    def _filter_planned_path_conflict(
+        self,
+        planned_paths,
+        normalized_path,
+        display_path,
+        src_md5,
+        summary,
+        warning_samples,
+        prefix,
+    ):
+        if planned_paths is None or normalized_path not in planned_paths:
+            return False
+        planned_md5 = planned_paths.get(normalized_path)
+        summary["existing_count"] += 1
+        if self._is_verified_same_file(src_md5, planned_md5):
+            return True
+        summary["conflict_count"] += 1
+        self._add_warning_sample(
+            warning_samples,
+            self._existing_conflict_message(display_path, src_md5, planned_md5, prefix),
+        )
+        return True
+
     def _filter_transfer_candidates_core(
         self,
         candidates,
         local_files_dict,
         summary,
         warning_samples,
+        planned_paths=None,
     ):
         transfer_list = []
 
@@ -799,6 +839,16 @@ class BaiduStorage:
             target_exists = candidate["final_normalized"] in local_files_dict
 
             if not need_rename:
+                if self._filter_planned_path_conflict(
+                    planned_paths,
+                    candidate["clean_normalized"],
+                    clean_path,
+                    src_md5,
+                    summary,
+                    warning_samples,
+                    "本轮同路径",
+                ):
+                    continue
                 if source_exists:
                     summary["existing_count"] += 1
                     if self._is_verified_same_file(src_md5, source_md5):
@@ -811,6 +861,26 @@ class BaiduStorage:
                         ),
                     )
                     continue
+            elif self._filter_planned_path_conflict(
+                planned_paths,
+                candidate["final_normalized"],
+                final_path,
+                src_md5,
+                summary,
+                warning_samples,
+                "本轮重命名目标",
+            ):
+                continue
+            elif self._filter_planned_path_conflict(
+                planned_paths,
+                candidate["clean_normalized"],
+                clean_path,
+                src_md5,
+                summary,
+                warning_samples,
+                "本轮源路径",
+            ):
+                continue
             elif target_exists:
                 summary["existing_count"] += 1
                 if self._is_verified_same_file(src_md5, target_md5):
@@ -839,16 +909,22 @@ class BaiduStorage:
             if candidate["dir_path"] is None or clean_path is None:
                 continue
 
-            transfer_list.append(
-                TransferItem(
-                    candidate["fs_id"],
-                    candidate["dir_path"],
-                    clean_path,
-                    final_path,
-                    need_rename,
-                    src_md5,
-                )
+            transfer_item = TransferItem(
+                candidate["fs_id"],
+                candidate["dir_path"],
+                clean_path,
+                final_path,
+                need_rename,
+                src_md5,
             )
+            if planned_paths is not None:
+                clean_normalized = candidate["clean_normalized"]
+                final_normalized = candidate["final_normalized"]
+                if clean_normalized:
+                    planned_paths[clean_normalized] = src_md5
+                if need_rename and final_normalized and final_normalized != clean_normalized:
+                    planned_paths[final_normalized] = src_md5
+            transfer_list.append(transfer_item)
             summary["transfer_needed_count"] += 1
             if need_rename:
                 summary["rename_needed_count"] += 1
@@ -882,7 +958,7 @@ class BaiduStorage:
 
         warning_samples = []
         transfer_list = self._filter_transfer_candidates_core(
-            candidates, local_files_dict, summary, warning_samples
+            candidates, local_files_dict, summary, warning_samples, {}
         )
         self._report_transfer_candidate_summary(
             summary, warning_samples, progress_callback
@@ -1928,6 +2004,7 @@ class BaiduStorage:
         warning_samples = []
         scanned_relative_dirs = set()
         local_files_dict = {}
+        current_planned_paths = {}
         shared_file_batch = []
         transfer_item_buffer = []
         total_transfer_count = 0
@@ -1971,6 +2048,8 @@ class BaiduStorage:
             total_transfer_count += len(transfer_list)
             transfer_success_count += success_count
             successful_transfer_items.extend(successful_items)
+            for item in successful_items:
+                self._record_transfer_item_paths(item, local_files_dict)
             transfer_failed_files.extend(failed_items)
             return None
 
@@ -1998,7 +2077,7 @@ class BaiduStorage:
                 scanned_relative_dirs.update(new_relative_dirs)
 
             transfer_list = self._filter_transfer_candidates_core(
-                candidates, local_files_dict, summary, warning_samples
+                candidates, local_files_dict, summary, warning_samples, current_planned_paths
             )
             transfer_item_buffer.extend(transfer_list)
             while len(transfer_item_buffer) >= TRANSFER_BATCH_SIZE:

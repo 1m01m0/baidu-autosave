@@ -35,7 +35,7 @@ from storage_errors import classify_storage_error, is_transfer_count_limit_error
 from storage_paths import StoragePathService
 from storage_rules import apply_regex_rules, should_exclude_folder, should_include_folder
 from storage_shares import SharedPathService
-from utils import format_error_info
+from utils import format_error_info, mask_sensitive
 from wechat_notifier import WeChatNotifier
 
 
@@ -119,6 +119,10 @@ class BaiduStoragePureMethodTests(unittest.TestCase):
 
         already_exists = classify_storage_error("error_code: 31061, message: 文件已经存在")
         self.assertEqual("already_exists", already_exists.kind)
+
+    def test_classify_storage_error_treats_cookie_markers_case_insensitively(self):
+        self.assertEqual("cookie_invalid", classify_storage_error("BDUSS expired").kind)
+        self.assertEqual("cookie_invalid", classify_storage_error("STOKEN invalid").kind)
 
     def test_classify_storage_error_treats_requests_json_decode_as_retryable_network(self):
         error = RequestsJSONDecodeError("Expecting value", "", 0)
@@ -231,8 +235,29 @@ class BaiduStoragePureMethodTests(unittest.TestCase):
         self.assertNotIn("refresh-secret", result)
         self.assertNotIn("bearer-secret", result)
 
+    def test_mask_sensitive_masks_cookie_json_dict_and_header_formats(self):
+        result = mask_sensitive(
+            "Cookie: BDUSS=bduss-secret; stoken=stoken-secret; "
+            "{'PANWEB': 'panweb-secret', \"H_PS_PSSID\": \"pssid-secret\", "
+            "BDORZ: bdorz-secret}"
+        )
 
-class BaiduClientAdapterTests(unittest.TestCase):
+        for secret in (
+            "bduss-secret",
+            "stoken-secret",
+            "panweb-secret",
+            "pssid-secret",
+            "bdorz-secret",
+        ):
+            self.assertNotIn(secret, result)
+        self.assertIn("BDUSS=***", result)
+        self.assertIn("stoken=***", result)
+        self.assertIn("'PANWEB': '***'", result)
+        self.assertIn('"H_PS_PSSID": "***"', result)
+        self.assertIn("BDORZ: ***", result)
+
+
+class BaiduClientAdapterRetryTests(unittest.TestCase):
     def _adapter(self):
         adapter = BaiduClientAdapter.__new__(BaiduClientAdapter)
         adapter.client = Mock()
@@ -259,6 +284,16 @@ class BaiduClientAdapterTests(unittest.TestCase):
 
                     self.assertEqual(expected, result)
                     self.assertEqual(2, getattr(adapter.client, method_name).call_count)
+
+    def test_list_retries_rate_limit_errors(self):
+        adapter = self._adapter()
+        adapter.client.list.side_effect = [RuntimeError("error_code: -65"), ["ok"]]
+
+        with patch("storage_client.time.sleep"):
+            result = adapter.list("/save")
+
+        self.assertEqual(["ok"], result)
+        self.assertEqual(2, adapter.client.list.call_count)
 
     def test_transfer_shared_paths_does_not_retry_in_adapter(self):
         adapter = self._adapter()
@@ -810,6 +845,11 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.storage.wechat_notifier = None
         self.storage._local_files_cache = {}
         self.storage.path_service = Mock()
+        self.storage.path_service.normalize_path.side_effect = lambda path, file_only=False: (
+            str(path).replace("\\", "/").strip("/").split("/")[-1]
+            if file_only
+            else str(path).replace("\\", "/").strip("/")
+        )
         self.storage.share_service = Mock()
         self.storage.share_service.iter_shared_files.return_value = []
 
@@ -1005,6 +1045,37 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.storage.client.transfer_shared_paths.assert_called_once_with(
             remotedir="/save",
             fs_ids=[1, 3],
+            uk=1,
+            share_id=2,
+            bdstoken="token",
+            shared_url="https://pan.baidu.com/s/abc",
+        )
+
+    def test_transfer_share_streaming_skips_duplicate_path_across_scan_batches(self):
+        self.storage._normalize_save_dir = Mock(return_value="/save")
+        self.storage.path_service.normalize_path.side_effect = lambda path, file_only=False: str(path).strip("/")
+        entry_context = {
+            "shared_paths": [Mock(is_dir=False)],
+            "uk": 1,
+            "share_id": 2,
+            "bdstoken": "token",
+        }
+        self.storage._load_share_entries = Mock(return_value=entry_context)
+        self.storage.share_service.iter_shared_files.return_value = [
+            {"fs_id": 1, "path": "dup.txt", "md5": "same-md5"},
+            {"fs_id": 2, "path": "dup.txt", "md5": "same-md5"},
+        ]
+        self.storage._scan_local_files_dict = Mock(return_value={})
+        self.storage.path_service.ensure_dir_exists.return_value = True
+
+        with patch("storage.TRANSFER_BATCH_SIZE", 1):
+            result = self.storage.transfer_share("https://pan.baidu.com/s/abc")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(1, result["completed_count"])
+        self.storage.client.transfer_shared_paths.assert_called_once_with(
+            remotedir="/save",
+            fs_ids=[1],
             uk=1,
             share_id=2,
             bdstoken="token",
@@ -1905,6 +1976,55 @@ class BaiduStorageFlowTests(unittest.TestCase):
             "info",
             "候选分析完成：共享文件 1 个，候选 1 个，正则过滤 0 个，本地已存在 1 个，"
             "冲突跳过 1 个，需要转存 0 个，其中需重命名 0 个",
+        )
+
+    def test_build_transfer_list_skips_duplicate_path_planned_in_same_batch(self):
+        self.storage.path_service.normalize_path.side_effect = lambda path, file_only=False: path.strip("/")
+        progress_callback = Mock()
+
+        result = self.storage._build_transfer_list(
+            [
+                {"fs_id": 1, "path": "a.txt", "md5": "md5-a"},
+                {"fs_id": 2, "path": "a.txt", "md5": "md5-a"},
+                {"fs_id": 3, "path": "a.txt", "md5": "md5-b"},
+            ],
+            [Mock(is_dir=False)],
+            "/save",
+            {},
+            progress_callback=progress_callback,
+        )
+
+        self.assertEqual([1], [item.fs_id for item in result])
+        progress_callback.assert_any_call(
+            "warning", "本轮同路径已存在,但内容不同(md5不同),跳过： a.txt"
+        )
+        progress_callback.assert_any_call(
+            "info",
+            "候选分析完成：共享文件 3 个，候选 3 个，正则过滤 0 个，本地已存在 2 个，"
+            "冲突跳过 1 个，需要转存 1 个，其中需重命名 0 个",
+        )
+
+    def test_build_transfer_list_treats_rename_target_as_planned_path(self):
+        self.storage.path_service.normalize_path.side_effect = lambda path, file_only=False: path.strip("/")
+        progress_callback = Mock()
+
+        result = self.storage._build_transfer_list(
+            [
+                {"fs_id": 1, "path": "old/a.txt", "md5": "md5-a"},
+                {"fs_id": 2, "path": "copy/a.txt", "md5": "md5-b"},
+            ],
+            [Mock(is_dir=False)],
+            "/save",
+            {},
+            regex_pattern=r"^(old|copy)/a\.txt$",
+            regex_replace="new/a.txt",
+            progress_callback=progress_callback,
+        )
+
+        self.assertEqual([1], [item.fs_id for item in result])
+        self.assertEqual("new/a.txt", result[0].final_path)
+        progress_callback.assert_any_call(
+            "warning", "本轮重命名目标已存在,但内容不同(md5不同),跳过： new/a.txt"
         )
 
     def test_split_existing_transfer_items_requires_matching_md5(self):

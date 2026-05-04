@@ -24,11 +24,18 @@ LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 _logger = None
 
 
+def _close_handlers(logger: logging.Logger) -> None:
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
+
+
 def _get_logger(
     name: str = "transfershare",
     level: str = "INFO",
     log_file: str = None,
     console_output: bool = True,
+    reconfigure: bool = False,
 ) -> logging.Logger:
     """获取或创建日志器
 
@@ -37,32 +44,32 @@ def _get_logger(
         level: 日志级别（DEBUG, INFO, WARNING, ERROR, CRITICAL）
         log_file: 日志文件路径（可选）
         console_output: 是否输出到控制台
+        reconfigure: 是否按参数重新配置已有日志器
 
     Returns:
         配置好的日志器实例
     """
     global _logger
 
-    if _logger is not None:
+    if _logger is not None and not reconfigure:
         return _logger
 
-    _logger = logging.getLogger(name)
-    _logger.setLevel(LOG_LEVELS.get(level.upper(), logging.INFO))
-    _logger.handlers.clear()
+    if _logger is None:
+        _logger = logging.getLogger(name)
+    else:
+        _close_handlers(_logger)
 
-    # 格式化器
+    log_level = LOG_LEVELS.get(level.upper(), logging.INFO)
+    _logger.setLevel(log_level)
+
     formatter = logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
 
-    # 控制台输出
     if console_output:
         console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setLevel(LOG_LEVELS.get(level.upper(), logging.INFO))
+        console_handler.setLevel(log_level)
         console_handler.setFormatter(formatter)
-        # 确保每条日志立即输出，避免缓冲问题
-        console_handler.flush()
         _logger.addHandler(console_handler)
 
-    # 文件输出
     if log_file:
         try:
             log_path = Path(log_file).parent
@@ -75,14 +82,7 @@ def _get_logger(
         except Exception as e:
             _logger.warning(f"无法创建日志文件 {log_file}: {e}")
 
-    # 防止日志传播到根日志器
     _logger.propagate = False
-
-    # 启用 flush=True 确保日志立即输出
-    for handler in _logger.handlers:
-        if isinstance(handler, logging.StreamHandler):
-            handler.stream.flush = sys.stdout.flush
-
     return _logger
 
 
@@ -109,7 +109,7 @@ def setup_logging(
     Returns:
         配置好的日志器实例
     """
-    return _get_logger("transfershare", level, log_file, console_output)
+    return _get_logger("transfershare", level, log_file, console_output, reconfigure=True)
 
 
 def log_startup(version: str = None) -> None:

@@ -37,6 +37,18 @@ https://pan.baidu.com/s/xyz_789
         self.assertEqual("9Z8y", result[1]["pwd"])
         self.assertEqual("/Shows", result[1]["save_dir"])
 
+    def test_parse_share_links_from_text_extracts_pwd_from_query_params(self):
+        result = parse_share_links_from_text(
+            "https://pan.baidu.com/s/abc12345?foo=bar&pwd=7X6z /Docs"
+        )
+
+        self.assertEqual("https://pan.baidu.com/s/abc12345", result[0]["share_url"])
+        self.assertEqual("7X6z", result[0]["pwd"])
+        self.assertEqual("/Docs", result[0]["save_dir"])
+
+    def test_parse_share_links_from_text_skips_invalid_pwd_query(self):
+        self.assertEqual([], parse_share_links_from_text("https://pan.baidu.com/s/abc12345?pwd=abcde"))
+
 
 class NormalizeShareUrlsValueTests(unittest.TestCase):
     def test_normalize_share_urls_value_supports_comma_separated_string(self):
@@ -67,6 +79,14 @@ class NormalizeShareUrlsValueTests(unittest.TestCase):
         self.assertEqual(2, result["share_count"])
         self.assertNotIn("save_dir", result["share_configs"][0])
         self.assertEqual("/Shows", result["share_configs"][1]["save_dir"])
+
+    def test_normalize_share_urls_value_canonicalizes_object_share_url_query_pwd(self):
+        result = normalize_share_urls_value(
+            [{"share_url": "https://pan.baidu.com/s/abc12345?pwd=1a2B"}], "/Default"
+        )
+
+        self.assertEqual("https://pan.baidu.com/s/abc12345", result["share_configs"][0]["share_url"])
+        self.assertEqual("1a2B", result["share_configs"][0]["pwd"])
 
 
 class ApplyGlobalShareDefaultsTests(unittest.TestCase):
@@ -177,6 +197,32 @@ class ValidateRuntimeConfigTests(unittest.TestCase):
         self.assertTrue(any("regex_replace 类型错误" in msg for msg in result["errors"]))
         self.assertTrue(any("文件夹过滤规则类型错误" in msg for msg in result["errors"]))
         self.assertTrue(any("排除文件夹规则错误" in msg for msg in result["errors"]))
+
+    def test_validate_runtime_config_rejects_dirty_object_share_url_and_bad_pwd(self):
+        result = validate_runtime_config(
+            {
+                "cookies": "BDUSS=foo; STOKEN=bar",
+                "share_urls": [
+                    {"share_url": "prefix https://pan.baidu.com/s/abc12345"},
+                    {"share_url": "https://pan.baidu.com/s/xyz_789?pwd=abcde"},
+                ],
+            }
+        )
+
+        self.assertTrue(any("格式不正确" in msg for msg in result["errors"]))
+        self.assertTrue(any("提取码必须是 4 位" in msg for msg in result["errors"]))
+
+    def test_validate_runtime_config_warns_about_dollar_regex_replace_groups(self):
+        result = validate_runtime_config(
+            {
+                "cookies": "BDUSS=foo; STOKEN=bar",
+                "share_urls": "https://pan.baidu.com/s/abc12345",
+                "regex_pattern": r"([0-9]+)-(.+)\.pdf$",
+                "regex_replace": "$1_$2.pdf",
+            }
+        )
+
+        self.assertTrue(any("Python re.sub()" in msg for msg in result["warnings"]))
 
 
 class LoadRuntimeConfigTests(unittest.TestCase):

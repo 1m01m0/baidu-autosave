@@ -301,13 +301,20 @@ def write_env_file(env_path: Path, cookies_min: str, cookies_full: str) -> None:
         sys.exit(1)
 
 
-def mask_cookie_string(cookie_str: str, show_length: int = 50) -> str:
-    """掩码 cookie 字符串，只显示前后部分"""
+def mask_cookie_string(cookie_str: str) -> str:
+    """掩码 cookie 字符串，仅保留键名和长度信息。"""
     if not cookie_str:
         return cookie_str
-    if len(cookie_str) <= show_length * 2:
-        return "*" * len(cookie_str)
-    return f"{cookie_str[:show_length]}...({len(cookie_str)} chars)...{cookie_str[-show_length:]}"
+
+    masked_parts = []
+    for part in cookie_str.split(";"):
+        if "=" not in part:
+            continue
+        name = part.split("=", 1)[0].strip()
+        if name:
+            masked_parts.append(f"{name}=***")
+
+    return f"{'; '.join(masked_parts)} ({len(cookie_str)} chars)"
 
 
 def do_browser_login_and_extract(
@@ -361,7 +368,7 @@ def do_browser_login_and_extract(
                 print(f"  STOKEN = {mask_token(stoken)}")
 
             if show_full_cookie:
-                print("\n完整 Cookie（含全部 name=value；请谨慎保管）：")
+                print("\n⚠️  即将显示完整 Cookie（含全部 name=value），请只在可信本地终端使用：")
                 print(cookies_full_str)
             else:
                 print("\n完整 Cookie（已掩码，使用 --show-full-cookie 查看完整内容）：")
@@ -421,7 +428,7 @@ def main() -> None:
     ap.add_argument(
         "--show-full-cookie",
         action="store_true",
-        help="显示完整的 cookie 字符串（默认会掩码显示）",
+        help="显示完整的 cookie 字符串（高风险；默认会掩码显示）",
     )
     args = ap.parse_args()
 

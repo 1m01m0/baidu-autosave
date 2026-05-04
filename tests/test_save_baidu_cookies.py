@@ -9,6 +9,8 @@ from save_baidu_cookies import (
     build_cookie_string,
     find_cookie,
     load_config,
+    main,
+    mask_cookie_string,
     read_env_values,
     set_secret,
     write_env_file,
@@ -53,6 +55,37 @@ class SaveBaiduCookiesTests(unittest.TestCase):
         result = build_cookie_string(cookie_map)
 
         self.assertEqual("BDUSS=bduss; STOKEN=token; AKEY=first; ZKEY=last", result)
+
+    def test_mask_cookie_string_hides_cookie_values(self):
+        cookie_str = (
+            "BDUSS=bduss-secret; STOKEN=token-secret; PANWEB=panweb-secret; "
+            "BIDUPSID=unknown-secret"
+        )
+
+        result = mask_cookie_string(cookie_str)
+
+        self.assertIn("BDUSS=***", result)
+        self.assertIn("STOKEN=***", result)
+        self.assertIn("PANWEB=***", result)
+        self.assertIn("BIDUPSID=***", result)
+        self.assertIn("chars", result)
+        self.assertNotIn("bduss-secret", result)
+        self.assertNotIn("token-secret", result)
+        self.assertNotIn("panweb-secret", result)
+        self.assertNotIn("unknown-secret", result)
+
+    def test_main_passes_show_full_cookie_flag(self):
+        for argv, expected in (
+            (["save_baidu_cookies.py", "--no-env-file"], False),
+            (["save_baidu_cookies.py", "--no-env-file", "--show-full-cookie"], True),
+        ):
+            with self.subTest(argv=argv), patch(
+                "save_baidu_cookies.do_browser_login_and_extract",
+                return_value=("BDUSS=min; STOKEN=min", "BDUSS=full; STOKEN=full"),
+            ) as login, patch("save_baidu_cookies.sys.argv", argv), patch("builtins.print"):
+                main()
+
+            login.assert_called_once_with(headless=False, show_full_cookie=expected)
 
     def test_load_config_normalizes_alias_fields(self):
         with tempfile.TemporaryDirectory() as temp_dir:

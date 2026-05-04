@@ -188,7 +188,7 @@ BDUSS=xxx; STOKEN=yyy; BDUSS_BFESS=zzz; ...
 ```
 效果：`2024-财务报表.pdf` → `2024/财务报表.pdf`
 
-> 替换语法使用 Python `re.sub()` 规则，分组引用请写 `\\1`、`\\2`，不要写 `$1`、`$2`。
+> 替换语法使用 Python `re.sub()` 规则，分组引用请写 `\\1`、`\\2`，不要写美元符号加数字的替换写法。
 
 ---
 
@@ -306,6 +306,13 @@ python transfer_runner.py
 3. 可选添加 `TRANSFERSHARE_STATE_KEY`：用于加密跨 run 持久化失败清单，建议用 `openssl rand -base64 32` 生成
 
 注意：失败清单可能包含分享链接、提取码和文件路径。workflow 只缓存 `.transfershare_failed_transfers.json.enc`；未配置 `TRANSFERSHARE_STATE_KEY` 时会跳过跨 run 状态恢复和保存，不会退回到明文缓存。
+
+**GitHub Actions 运维与安全：**
+- 定时转存每 6 小时的第 17 分钟触发，并通过并发锁串行同一分支的转存任务，不取消正在运行的任务。
+- workflow 使用 `permissions: contents: read`，checkout 显式设置 `persist-credentials: false`。
+- 测试 workflow 会运行 `actionlint`，并在 Python 3.9 到 Python 3.12 的 matrix 上执行单测。
+- 定时脚本第一次运行超时为 7 分钟，失败后等待 5 秒重试，第二次运行超时为 10 分钟。
+- Cookie 日志默认脱敏；`save_baidu_cookies.py --show-full-cookie` 只用于可信本地终端的临时排查。
 
 ---
 

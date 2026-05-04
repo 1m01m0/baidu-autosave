@@ -15,11 +15,7 @@ if _VENDOR_BAIDUPCS_PATH.exists():
 
 from baidupcs_py.baidupcs import BaiduPCSApi
 
-from storage_errors import (
-    classify_storage_error,
-    is_network_error,
-    is_retry_abort_error,
-)
+from storage_errors import classify_storage_error
 
 try:
     from logger import get_logger
@@ -126,15 +122,15 @@ class BaiduClientAdapter:
             except Exception as exc:
                 last_error = exc
                 error_info = classify_storage_error(exc)
-                if is_network_error(exc):
+                if error_info.retryable:
                     if attempt < self.max_retries - 1:
                         logger.debug(
-                            f"网络请求失败（第{attempt + 1}次尝试）: {error_info.raw_message}"
+                            f"可重试请求失败（第{attempt + 1}次尝试）: {error_info.raw_message}"
                         )
                         continue
-                    logger.warning(f"网络请求最终失败，已重试{self.max_retries}次")
+                    logger.warning(f"可重试请求最终失败，已重试{self.max_retries}次")
                     break
-                if is_retry_abort_error(exc):
+                if error_info.kind == "retry_abort":
                     if suppress_retry_abort:
                         last_error = None
                         break
