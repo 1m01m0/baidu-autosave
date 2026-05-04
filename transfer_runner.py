@@ -4,6 +4,7 @@
 import json
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 from storage import BaiduStorage
@@ -21,7 +22,12 @@ from logger import (
     log_shutdown,
     log_config_loaded,
 )
-from config_utils import load_runtime_config, retry_share_config_key, validate_runtime_config
+from config_utils import (
+    build_retry_share_config,
+    load_runtime_config,
+    retry_share_config_key,
+    validate_runtime_config,
+)
 
 
 FAILED_TRANSFERS_FILE = Path(__file__).resolve().parent / ".transfershare_failed_transfers.json"
@@ -45,6 +51,30 @@ MAX_FAILED_TRANSFER_ATTEMPTS = _read_positive_int_env(
 )
 FAILED_RECORD_SCHEMA_VERSION = 2
 TEMPORARY_FAILED_RETRY_DELAY_SECONDS = 6 * 60 * 60
+FAILED_RECORD_PERSISTED_KEYS = (
+    "schema_version",
+    "share_config",
+    "failed_files",
+    "error",
+    "error_kind",
+    "retryable",
+    "temporary",
+    "failed_at",
+    "last_failed_at",
+    "attempts",
+    "next_retry_after",
+)
+FAILED_FILE_PERSISTED_KEYS = (
+    "fs_id",
+    "dir_path",
+    "clean_path",
+    "final_path",
+    "error",
+    "error_kind",
+    "retryable",
+    "temporary",
+    "failed_at",
+)
 
 
 def load_failed_transfer_records(path=None):
@@ -75,16 +105,35 @@ def load_failed_transfer_records(path=None):
 def save_failed_transfer_records(records, path=None):
     path = Path(path or FAILED_TRANSFERS_FILE)
     if not records:
-        if path.exists():
-            path.unlink()
+        path.unlink(missing_ok=True)
         return
 
-    tmp_path = path.with_name(f"{path.name}.tmp")
-    with tmp_path.open("w", encoding="utf-8") as f:
-        json.dump({"records": records}, f, ensure_ascii=False, indent=2)
-        f.write("\n")
-    os.chmod(tmp_path, 0o600)
-    os.replace(tmp_path, path)
+    fd = None
+    tmp_path = None
+    try:
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f"{path.name}.", suffix=".tmp", dir=str(path.parent)
+        )
+        tmp_path = Path(tmp_name)
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            fd = None
+            json.dump({"records": records}, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        os.replace(tmp_path, path)
+        tmp_path = None
+    except Exception:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
 
 
 def _current_timestamp():
@@ -159,11 +208,27 @@ def _normalize_failed_file(failed_file, fallback_error, now):
         detail.get("temporary"), is_storage_temporary_error_info(error_info)
     )
 
-    detail["error_kind"] = error_kind
-    detail["retryable"] = retryable
-    detail["temporary"] = temporary
-    detail.setdefault("failed_at", now)
-    return detail
+    normalized = {}
+    for key in ("fs_id", "dir_path"):
+        if detail.get(key) not in (None, ""):
+            normalized[key] = detail[key]
+    clean_path = detail.get("clean_path") or detail.get("path")
+    if clean_path:
+        normalized["clean_path"] = clean_path
+    final_path = detail.get("final_path")
+    if final_path:
+        normalized["final_path"] = final_path
+    if error_text:
+        normalized["error"] = error_text
+    normalized["error_kind"] = error_kind
+    normalized["retryable"] = retryable
+    normalized["temporary"] = temporary
+    normalized["failed_at"] = detail.get("failed_at", now)
+    return {
+        key: normalized[key]
+        for key in FAILED_FILE_PERSISTED_KEYS
+        if key in normalized and normalized[key] not in (None, "")
+    }
 
 
 def _normalize_failed_files(failed_files, fallback_error, now):
@@ -177,10 +242,25 @@ def _normalize_failed_files(failed_files, fallback_error, now):
     return normalized
 
 
+def _filter_failed_record_fields(record):
+    return {
+        key: record[key]
+        for key in FAILED_RECORD_PERSISTED_KEYS
+        if key in record and record[key] not in (None, "")
+    }
+
+
 def _trim_failed_record(record):
-    trimmed = dict(record)
-    trimmed["failed_files"] = list(trimmed.get("failed_files", []))[:MAX_FAILED_FILES_PER_RECORD]
-    return trimmed
+    fallback_error = record.get("error") or record.get("message") or ""
+    now = record.get("last_failed_at") or record.get("failed_at") or _current_timestamp()
+    normalized_files = _normalize_failed_files(record.get("failed_files", []), fallback_error, now)
+    source = {
+        **record,
+        "schema_version": record.get("schema_version") or FAILED_RECORD_SCHEMA_VERSION,
+        "share_config": build_retry_share_config(record.get("share_config") or {}),
+        "failed_files": normalized_files,
+    }
+    return _filter_failed_record_fields(source)
 
 
 def build_failed_transfer_records(result, previous_records=None, increment_attempts=False):
@@ -206,7 +286,7 @@ def build_failed_transfer_records(result, previous_records=None, increment_attem
         previous_record = previous_by_key.get(key, {})
         record = {
             "schema_version": FAILED_RECORD_SCHEMA_VERSION,
-            "share_config": retry_config,
+            "share_config": build_retry_share_config(retry_config),
             "failed_files": normalized_failed_files,
             "error": error_text,
             "error_kind": normalized_failed_files[0].get("error_kind", "unknown"),
@@ -218,7 +298,7 @@ def build_failed_transfer_records(result, previous_records=None, increment_attem
         }
         if retryable and temporary:
             record["next_retry_after"] = now + TEMPORARY_FAILED_RETRY_DELAY_SECONDS
-        records.append(_trim_failed_record(record))
+        records.append(_filter_failed_record_fields(record))
     return records
 
 

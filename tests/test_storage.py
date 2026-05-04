@@ -33,7 +33,14 @@ from storage import (
 from storage_client import BaiduClientAdapter
 from storage_errors import classify_storage_error, is_transfer_count_limit_error, parse_share_error
 from storage_paths import StoragePathService
-from storage_rules import apply_regex_rules, should_exclude_folder, should_include_folder
+from storage_rules import (
+    REGEX_FILTER_UNMATCHED,
+    REGEX_FILTER_UNSAFE_REPLACE,
+    apply_regex_rules,
+    apply_regex_rules_detail,
+    should_exclude_folder,
+    should_include_folder,
+)
 from storage_shares import SharedPathService
 from utils import format_error_info, mask_sensitive
 from wechat_notifier import WeChatNotifier
@@ -86,13 +93,43 @@ class BaiduStoragePureMethodTests(unittest.TestCase):
         self.assertEqual("分享链接访问失败（错误码：999）", result)
 
     def test_apply_regex_rules_handles_match_replace_and_invalid_pattern(self):
-        self.assertEqual((True, "/dir/file.mp4"), apply_regex_rules("/dir/file.mp4"))
-        self.assertEqual((False, "/dir/file.txt"), apply_regex_rules("/dir/file.txt", r"\\.mp4$"))
+        self.assertEqual((True, "dir/file.mp4"), apply_regex_rules("dir/file.mp4"))
+        self.assertEqual((False, "dir/file.txt"), apply_regex_rules("dir/file.txt", r"\\.mp4$"))
         self.assertEqual(
-            (True, "/dir/video.mp4"),
-            apply_regex_rules("/dir/file.mp4", r"file", "video"),
+            (True, "dir/video.mp4"),
+            apply_regex_rules("dir/file.mp4", r"file", "video"),
         )
-        self.assertEqual((True, "/dir/file.mp4"), apply_regex_rules("/dir/file.mp4", "["))
+        self.assertEqual((True, "dir/file.mp4"), apply_regex_rules("dir/file.mp4", "["))
+
+    def test_apply_regex_rules_detail_reports_filter_reason(self):
+        self.assertEqual(
+            (False, "dir/file.txt", REGEX_FILTER_UNMATCHED),
+            apply_regex_rules_detail("dir/file.txt", r"\.mp4$"),
+        )
+        self.assertEqual(
+            (False, "dir/file.mp4", REGEX_FILTER_UNSAFE_REPLACE),
+            apply_regex_rules_detail("dir/file.mp4", r"dir/file\.mp4$", "../evil.mp4"),
+        )
+        self.assertEqual(
+            (True, "dir/file.mp4", None),
+            apply_regex_rules_detail("dir/file.mp4", "["),
+        )
+
+    def test_apply_regex_rules_rejects_unsafe_replace_targets(self):
+        unsafe_replacements = [
+            "../evil.mp4",
+            "/evil.mp4",
+            "a/../../evil.mp4",
+            r"C:\\evil.mp4",
+            "a//evil.mp4",
+            "\x00evil.mp4",
+        ]
+        for replacement in unsafe_replacements:
+            with self.subTest(replacement=replacement):
+                self.assertEqual(
+                    (False, "dir/file.mp4"),
+                    apply_regex_rules("dir/file.mp4", r"dir/file\.mp4$", replacement),
+                )
 
     def test_should_include_folder_supports_none_string_list_and_invalid_regex(self):
         self.assertTrue(should_include_folder("Movies"))
@@ -504,6 +541,67 @@ class SharedPathServiceTests(unittest.TestCase):
             "/single-share", 1, 2, "token", page=1, size=100
         )
 
+    def test_list_shared_files_handles_deep_directory_without_recursion(self):
+        root_dir = SimpleNamespace(
+            path="/single-share",
+            is_dir=True,
+            uk=1,
+            share_id=2,
+            bdstoken="token",
+        )
+        depth = 150
+        listings = {}
+        path = "/single-share"
+        relative_parts = []
+        for index in range(depth):
+            child_path = f"{path}/d{index}"
+            listings[path] = [SimpleNamespace(path=child_path, is_dir=True, fs_id=index + 10)]
+            path = child_path
+            relative_parts.append(f"d{index}")
+        listings[path] = [
+            SimpleNamespace(path=f"{path}/file.txt", is_dir=False, fs_id=99, size=123, md5="md5-file")
+        ]
+        self.service.client.list_shared_paths.side_effect = lambda scan_path, *args, **kwargs: listings[scan_path]
+        old_limit = sys.getrecursionlimit()
+
+        try:
+            sys.setrecursionlimit(100)
+            files = self.service.list_shared_files([root_dir])
+        finally:
+            sys.setrecursionlimit(old_limit)
+
+        self.assertEqual(1, len(files))
+        self.assertEqual("/".join(relative_parts + ["file.txt"]), files[0]["path"])
+        self.assertEqual("md5-file", files[0]["md5"])
+
+    def test_list_shared_files_excludes_deep_filtered_directory_without_recursion(self):
+        root_dir = SimpleNamespace(
+            path="/single-share",
+            is_dir=True,
+            uk=1,
+            share_id=2,
+            bdstoken="token",
+        )
+        src_dir = SimpleNamespace(path="/single-share/src", is_dir=True, fs_id=10)
+        node_modules = SimpleNamespace(path="/single-share/src/node_modules", is_dir=True, fs_id=11)
+        app_file = SimpleNamespace(path="/single-share/src/app.py", is_dir=False, fs_id=12, size=1, md5="app")
+        listings = {
+            "/single-share": [src_dir],
+            "/single-share/src": [node_modules, app_file],
+        }
+        self.service.client.list_shared_paths.side_effect = lambda scan_path, *args, **kwargs: listings.get(scan_path, [])
+
+        files = self.service.list_shared_files(
+            [root_dir], exclude_folder_filter=r"^node_modules$"
+        )
+
+        self.assertEqual(1, len(files))
+        self.assertEqual("src/app.py", files[0]["path"])
+        self.assertNotIn(
+            call("/single-share/src/node_modules", 1, 2, "token", page=1, size=100),
+            self.service.client.list_shared_paths.call_args_list,
+        )
+
     def test_list_shared_dir_children_returns_direct_child_metadata(self):
         child_dir = SimpleNamespace(
             path="/single-share/src",
@@ -794,6 +892,92 @@ class StoragePathServiceTests(unittest.TestCase):
         client.list.assert_called_once_with("/考公/2026/政治理论常识背诵手册")
         notify.assert_not_called()
 
+    def test_list_local_files_handles_deep_directory_without_recursion(self):
+        client = Mock()
+        depth = 150
+        listings = {}
+        path = "/save"
+        relative_parts = []
+        for index in range(depth):
+            child_path = f"{path}/d{index}"
+            listings[path] = [SimpleNamespace(is_file=False, is_dir=True, path=child_path)]
+            path = child_path
+            relative_parts.append(f"d{index}")
+        listings[path] = [
+            SimpleNamespace(is_file=True, is_dir=False, path=f"{path}/file.txt", md5="md5-file")
+        ]
+        client.list.side_effect = lambda scan_path: listings[scan_path]
+        service = StoragePathService(client)
+        old_limit = sys.getrecursionlimit()
+
+        try:
+            sys.setrecursionlimit(100)
+            result = service.list_local_files("/save")
+        finally:
+            sys.setrecursionlimit(old_limit)
+
+        self.assertEqual(
+            [
+                {
+                    "relative_path": "/".join(relative_parts + ["file.txt"]),
+                    "file_name": "file.txt",
+                    "md5": "md5-file",
+                }
+            ],
+            result,
+        )
+
+    def test_list_local_files_in_dirs_handles_deep_merged_scan_without_recursion(self):
+        client = Mock()
+        depth = 150
+        listings = {
+            "/save/A": [
+                SimpleNamespace(is_file=False, is_dir=True, path="/save/A/1"),
+                SimpleNamespace(is_file=False, is_dir=True, path="/save/A/2"),
+                SimpleNamespace(is_file=False, is_dir=True, path="/save/A/other"),
+            ],
+            "/save/A/2": [
+                SimpleNamespace(is_file=True, is_dir=False, path="/save/A/2/b.txt", md5="md5-b")
+            ],
+            "/save/A/other": [
+                SimpleNamespace(is_file=True, is_dir=False, path="/save/A/other/ignored.txt", md5="ignored")
+            ],
+        }
+        path = "/save/A/1"
+        relative_parts = ["A", "1"]
+        for index in range(depth):
+            child_path = f"{path}/d{index}"
+            listings[path] = [SimpleNamespace(is_file=False, is_dir=True, path=child_path)]
+            path = child_path
+            relative_parts.append(f"d{index}")
+        listings[path] = [
+            SimpleNamespace(is_file=True, is_dir=False, path=f"{path}/a.txt", md5="md5-a")
+        ]
+        client.list.side_effect = lambda scan_path: listings[scan_path]
+        service = StoragePathService(client)
+        old_limit = sys.getrecursionlimit()
+
+        try:
+            sys.setrecursionlimit(100)
+            result = service.list_local_files_in_dirs(
+                "/save", {"/".join(relative_parts), "A/2"}, merge_dirs=True
+            )
+        finally:
+            sys.setrecursionlimit(old_limit)
+
+        self.assertEqual(
+            [
+                {
+                    "relative_path": "/".join(relative_parts + ["a.txt"]),
+                    "file_name": "a.txt",
+                    "md5": "md5-a",
+                },
+                {"relative_path": "A/2/b.txt", "file_name": "b.txt", "md5": "md5-b"},
+            ],
+            result,
+        )
+        self.assertNotIn(call("/save/A/other"), client.list.call_args_list)
+
 
 class WeChatNotifierTests(unittest.TestCase):
     def test_mask_sensitive_uses_shared_helper(self):
@@ -852,6 +1036,20 @@ class BaiduStorageFlowTests(unittest.TestCase):
         )
         self.storage.share_service = Mock()
         self.storage.share_service.iter_shared_files.return_value = []
+
+    def test_rename_transferred_files_rejects_unsafe_target_path(self):
+        item = TransferItem(1, "/save", "clean.txt", "../evil.txt", True, "md5")
+
+        with patch("storage.handle_error_and_notify") as notify:
+            result = self.storage._rename_transferred_files([item], "/save")
+
+        self.assertEqual([], result["transferred_files"])
+        self.assertEqual(1, result["rename_failed_count"])
+        self.assertEqual(0, result["completed_count"])
+        self.assertEqual("../evil.txt", result["rename_failed_files"][0]["target_path"])
+        self.storage.path_service.ensure_dir_exists.assert_not_called()
+        self.storage.client.rename.assert_not_called()
+        notify.assert_called_once()
 
     def test_transfer_share_returns_skipped_when_no_transfer_candidates(self):
         self.storage._normalize_save_dir = Mock(return_value="/save")
@@ -1573,6 +1771,61 @@ class BaiduStorageFlowTests(unittest.TestCase):
             shared_url="url",
         )
 
+    def test_transfer_dir_tree_divide_handles_deep_directory_without_recursion(self):
+        shared_dir = SimpleNamespace(path="/share/course", is_dir=True, fs_id=10)
+        depth = 150
+        children_by_path = {}
+        path = "/share/course"
+        for index in range(depth):
+            child_path = f"{path}/d{index}"
+            child_dir = SimpleNamespace(path=child_path, is_dir=True, is_file=False, fs_id=index + 20)
+            children_by_path[path] = [
+                {
+                    "raw": child_dir,
+                    "fs_id": index + 20,
+                    "path": child_path,
+                    "name": f"d{index}",
+                    "is_dir": True,
+                    "is_file": False,
+                }
+            ]
+            path = child_path
+        children_by_path[path] = [
+            {
+                "raw": SimpleNamespace(path=f"{path}/file.txt", is_dir=False, is_file=True, fs_id=999),
+                "fs_id": 999,
+                "path": f"{path}/file.txt",
+                "name": "file.txt",
+                "is_dir": False,
+                "is_file": True,
+                "md5": "md5-file",
+            }
+        ]
+
+        def iter_children(current_dir, *args):
+            return children_by_path[getattr(current_dir, "path", current_dir)]
+
+        self.storage.path_service.ensure_dir_exists.return_value = True
+        self.storage.share_service.iter_shared_dir_children.side_effect = iter_children
+        old_limit = sys.getrecursionlimit()
+
+        try:
+            sys.setrecursionlimit(100)
+            result = self.storage._transfer_dir_tree_divide(
+                shared_dir,
+                "/save/course",
+                {"uk": 1, "share_id": 2, "bdstoken": "token"},
+                "url",
+                r"^skip$",
+            )
+        finally:
+            sys.setrecursionlimit(old_limit)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(1, result["completed_count"])
+        self.storage.client.transfer_shared_paths.assert_called_once()
+        self.assertEqual([999], self.storage.client.transfer_shared_paths.call_args.kwargs["fs_ids"])
+
     def test_transfer_dir_tree_divide_splits_files_by_batch_size(self):
         shared_dir = SimpleNamespace(path="/share/course", is_dir=True, fs_id=10)
         children = [
@@ -1935,6 +2188,25 @@ class BaiduStorageFlowTests(unittest.TestCase):
             "warning", "源路径已存在,但内容不同(md5不同),跳过： old/a.txt"
         )
 
+    def test_prepare_transfer_candidates_splits_regex_filter_reasons(self):
+        candidates, summary, _ = self.storage._prepare_transfer_candidates(
+            [
+                {"fs_id": 1, "path": "safe/file.mp4", "md5": "md5-safe"},
+                {"fs_id": 2, "path": "skip.txt", "md5": "md5-skip"},
+                {"fs_id": 3, "path": "bad/../file.mp4", "md5": "md5-bad"},
+            ],
+            [Mock(is_dir=False)],
+            "/save",
+            regex_pattern=r"^(safe|bad/\.\.)/file\.mp4$",
+            regex_replace=r"\1/out.mp4",
+        )
+
+        self.assertEqual([1], [candidate["fs_id"] for candidate in candidates])
+        self.assertEqual(2, summary["regex_filtered_count"])
+        self.assertEqual(1, summary["regex_unmatched_count"])
+        self.assertEqual(1, summary["unsafe_regex_replace_count"])
+        self.assertEqual(1, summary["candidate_count"])
+
     def test_build_transfer_list_skips_rename_candidate_when_target_exists(self):
         self.storage.path_service.normalize_path.side_effect = lambda path, file_only=False: path.strip("/")
         progress_callback = Mock()
@@ -2221,7 +2493,9 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.assertTrue(failed_items[0]["retryable"])
         self.assertTrue(failed_items[0]["temporary"])
         self.assertIn("failed_at", failed_items[0])
-        self.assertEqual(1, failed_items[0]["attempts"])
+        self.assertNotIn("target_dir", failed_items[0])
+        self.assertNotIn("need_rename", failed_items[0])
+        self.assertNotIn("attempts", failed_items[0])
         self.assertEqual(1, self.storage.client.transfer_shared_paths.call_count)
         sleep.assert_not_called()
         notify.assert_not_called()
@@ -2305,7 +2579,9 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.assertEqual("missing_path", failed_items[0]["error_kind"])
         self.assertFalse(failed_items[0]["retryable"])
         self.assertFalse(failed_items[0]["temporary"])
-        self.assertEqual(1, failed_items[0]["attempts"])
+        self.assertNotIn("target_dir", failed_items[0])
+        self.assertNotIn("need_rename", failed_items[0])
+        self.assertNotIn("attempts", failed_items[0])
         self.assertEqual(1, self.storage.client.transfer_shared_paths.call_count)
         sleep.assert_not_called()
         notify.assert_called_once()

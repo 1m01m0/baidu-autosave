@@ -8,6 +8,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit, urlunsplit
 from typing import Any, Dict, List, Mapping, Optional, Union
 
+from storage_rules import is_safe_relative_target_path
+
 DEFAULT_SAVE_DIR = "/AutoTransfer"
 RETRY_SHARE_CONFIG_KEYS = (
     "share_url",
@@ -27,6 +29,12 @@ _PWD_VALUE_PATTERN = re.compile(r"[A-Za-z0-9]{4}")
 _PWD_INLINE_PATTERN = re.compile(
     r"(?:\bpwd\b|密码|提取码)[:：]?\s*([A-Za-z0-9]{4})", re.IGNORECASE
 )
+_REGEX_BACKREFERENCE_PATTERN = re.compile(r"\\g<[^>]+>|\\[1-9][0-9]*")
+
+
+def _is_safe_regex_replace_template(value: str) -> bool:
+    template = _REGEX_BACKREFERENCE_PATTERN.sub("group", value)
+    return is_safe_relative_target_path(template)
 
 
 def build_retry_share_config(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -438,13 +446,19 @@ def _validate_regex_replace_config(
             f"❌ {field_name} 类型错误，应为字符串，当前类型: {type(value).__name__}"
         )
         return
+    if not _is_safe_regex_replace_template(value):
+        errors.append(f"❌ {label}不能生成绝对路径或包含上级目录跳转")
+        return
     if re.search(r"\$[1-9]\d*", value):
         warnings.append(f"⚠️  {label}使用 Python re.sub() 语法，请用 \\1、\\2 表示分组引用")
     if isinstance(regex_pattern, str):
         try:
-            re.sub(regex_pattern, value, "test_file.mp4")
+            sample_result = re.sub(regex_pattern, value, "test_file.mp4")
         except Exception as exc:
             warnings.append(f"⚠️  {label}可能有问题: {exc}")
+            return
+        if sample_result != "test_file.mp4" and not is_safe_relative_target_path(sample_result):
+            errors.append(f"❌ {label}不能生成绝对路径或包含上级目录跳转")
             return
     info_messages.append(f"✅ {label}有效: {value}")
 

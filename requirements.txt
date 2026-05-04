@@ -1,8 +1,8 @@
-requests==2.32.5
-requests-toolbelt>=1.0
-rich>=13.7
-pillow>=10.1
-typing-extensions>=4.8
-cryptography>=41.0
-Cython>=3.0
-passlib>=1.7
+requests==2.33.0
+requests-toolbelt==1.0.0
+rich==14.2.0
+pillow==12.2.0
+typing-extensions==4.15.0
+cryptography==46.0.7
+Cython==3.1.4
+passlib==1.7.4

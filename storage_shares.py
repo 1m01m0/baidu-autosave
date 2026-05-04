@@ -198,73 +198,74 @@ class SharedPathService:
         if stats is None:
             stats = self._new_scan_stats()
 
-        try:
-            if not self.client:
-                handle_error_and_notify(
-                    ValueError("客户端未初始化或初始化失败"),
-                    "获取共享目录文件失败: 客户端不可用",
-                    self.wechat_notifier,
-                    None,
-                    collect=False,
-                )
-                return
+        if not self.client:
+            handle_error_and_notify(
+                ValueError("客户端未初始化或初始化失败"),
+                "获取共享目录文件失败: 客户端不可用",
+                self.wechat_notifier,
+                None,
+                collect=False,
+            )
+            return
 
-            dir_path = getattr(path, "path", path)
-            stats["dirs"] += 1
-            if self._should_report_progress(stats):
-                self._report_scan_progress(progress_callback, stats)
+        stack = [(path, None, None)]
+        while stack:
+            current_path_obj, page_iter, file_iter = stack.pop()
+            dir_path = getattr(current_path_obj, "path", current_path_obj)
+            try:
+                if page_iter is None:
+                    stats["dirs"] += 1
+                    if self._should_report_progress(stats):
+                        self._report_scan_progress(progress_callback, stats)
+                    page_iter = iter(self._iter_shared_dir_pages(dir_path, uk, share_id, bdstoken))
 
-            for page, sub_files in self._iter_shared_dir_pages(
-                dir_path, uk, share_id, bdstoken
-            ):
-                stats["pages"] += 1
-                if self._should_report_progress(stats):
-                    self._report_scan_progress(progress_callback, stats)
+                while True:
+                    if file_iter is None:
+                        page, sub_files = next(page_iter)
+                        stats["pages"] += 1
+                        if self._should_report_progress(stats):
+                            self._report_scan_progress(progress_callback, stats)
+                        if not sub_files:
+                            if page == 1 and progress_callback:
+                                progress_callback("info", f"共享目录为空: {dir_path}")
+                            break
+                        file_iter = iter(sub_files)
 
-                if not sub_files:
-                    if page == 1 and progress_callback:
-                        progress_callback("info", f"共享目录为空: {dir_path}")
-                    break
+                    try:
+                        sub_file = next(file_iter)
+                    except StopIteration:
+                        file_iter = None
+                        continue
 
-                for sub_file in sub_files:
-                    is_dir = getattr(sub_file, "is_dir", False)
-                    if is_dir:
-                        folder_name = os.path.basename(
-                            getattr(sub_file, "path", "").rstrip("/")
-                        )
+                    child = self._normalize_shared_child(sub_file)
+                    if child["is_dir"]:
+                        folder_name = child["name"]
                         if should_exclude_folder(folder_name, exclude_folder_filter):
                             stats["skipped_dirs"] += 1
                         elif should_include_folder(folder_name, folder_filter):
-                            yield from self.iter_shared_dir_files(
-                                sub_file,
-                                uk,
-                                share_id,
-                                bdstoken,
-                                folder_filter,
-                                shared_root,
-                                progress_callback,
-                                stats,
-                                exclude_folder_filter=exclude_folder_filter,
-                            )
+                            stack.append((current_path_obj, page_iter, file_iter))
+                            stack.append((child["raw"], None, None))
+                            break
                         else:
                             stats["skipped_dirs"] += 1
                     else:
-                        file_info = self._normalize_shared_file_info(sub_file, shared_root)
+                        file_info = self._normalize_shared_file_info(child["raw"], shared_root)
                         if file_info:
                             stats["files"] += 1
                             if self._should_report_progress(stats):
                                 self._report_scan_progress(progress_callback, stats)
                             yield file_info
-
-        except Exception as exc:
-            handle_error_and_notify(
-                exc,
-                f"获取共享目录文件时发生异常\n目录路径: {getattr(path, 'path', path)}",
-                self.wechat_notifier,
-                None,
-                collect=True,
-            )
-            raise
+            except StopIteration:
+                continue
+            except Exception as exc:
+                handle_error_and_notify(
+                    exc,
+                    f"获取共享目录文件时发生异常\n目录路径: {dir_path}",
+                    self.wechat_notifier,
+                    None,
+                    collect=True,
+                )
+                raise
 
     def list_shared_dir_files(
         self,

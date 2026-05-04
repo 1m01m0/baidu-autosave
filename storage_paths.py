@@ -154,6 +154,51 @@ class StoragePathService:
             return bool(path)
         return path == parent or path.startswith(f"{parent}/")
 
+    @staticmethod
+    def _relative_item_path(item_path, base):
+        item_path = item_path.replace("\\", "/")
+        if item_path.startswith(base):
+            return item_path[len(base) :]
+        return item_path.lstrip("/")
+
+    def _iter_listed_dir(self, current_path, missing_ok=False):
+        try:
+            return iter(self.client.list(current_path))
+        except Exception as exc:
+            error_info = classify_storage_error(exc)
+            if missing_ok and (error_info.kind == "missing_path" or error_info.code == "31023"):
+                return None
+            handle_error_and_notify(
+                exc,
+                f"列出目录内容时发生错误\n目录路径: {current_path}",
+                self.wechat_notifier,
+                None,
+                collect=False,
+            )
+            raise
+
+    def _iter_local_tree_items(self, root_path, missing_ok=False, should_descend=None):
+        def is_missing_ok(current_path):
+            return missing_ok(current_path) if callable(missing_ok) else missing_ok
+
+        item_iter = self._iter_listed_dir(root_path, missing_ok=is_missing_ok(root_path))
+        if item_iter is None:
+            return
+        stack = [(root_path, item_iter)]
+        while stack:
+            _, item_iter = stack[-1]
+            try:
+                item = next(item_iter)
+            except StopIteration:
+                stack.pop()
+                continue
+
+            yield item
+            if item.is_dir and (should_descend is None or should_descend(item)):
+                child_iter = self._iter_listed_dir(item.path, missing_ok=is_missing_ok(item.path))
+                if child_iter is not None:
+                    stack.append((item.path, child_iter))
+
     @classmethod
     def _build_local_scan_plan(cls, relative_dirs, merge_dirs=False):
         scan_plan = {relative_dir: False for relative_dir in relative_dirs}
@@ -219,17 +264,11 @@ class StoragePathService:
                 normalized_relative_dirs, merge_dirs=merge_dirs
             )
 
-            def _to_relative_path(item_path):
-                item_path = item_path.replace("\\", "/")
-                if item_path.startswith(base):
-                    return item_path[len(base) :]
-                return item_path.lstrip("/")
-
             def _append_file(item):
                 item_path = getattr(item, "path", "").replace("\\", "/")
                 if merge_dirs and not item_path.startswith(base):
                     return
-                relative_path = _to_relative_path(item_path)
+                relative_path = self._relative_item_path(item_path, base)
                 if merge_dirs:
                     parent_dir = self._normalize_relative_dir(posixpath.dirname(relative_path))
                     if parent_dir not in normalized_relative_dirs:
@@ -251,29 +290,17 @@ class StoragePathService:
                 )
 
             def _list_dir(scan_path, recursive=False):
-                try:
-                    content = self.client.list(scan_path)
-                except Exception as exc:
-                    error_info = classify_storage_error(exc)
-                    if error_info.kind == "missing_path" or error_info.code == "31023":
-                        return
-                    handle_error_and_notify(
-                        exc,
-                        f"列出目录内容时发生错误\n目录路径: {scan_path}",
-                        self.wechat_notifier,
-                        None,
-                        collect=False,
-                    )
-                    raise
+                def should_descend(item):
+                    if not recursive:
+                        return False
+                    item_path = getattr(item, "path", "").replace("\\", "/")
+                    return _should_descend(self._relative_item_path(item_path, base))
 
-                for item in content:
+                for item in self._iter_local_tree_items(
+                    scan_path, missing_ok=True, should_descend=should_descend
+                ):
                     if item.is_file:
                         _append_file(item)
-                    elif recursive and item.is_dir:
-                        item_path = getattr(item, "path", "").replace("\\", "/")
-                        relative_path = _to_relative_path(item_path)
-                        if _should_descend(relative_path):
-                            _list_dir(item.path, recursive=True)
 
             for relative_dir, recursive in sorted(scan_plan.items()):
                 scan_path = normalized_dir_path.rstrip("/") or "/"
@@ -315,41 +342,20 @@ class StoragePathService:
             if not base.endswith("/"):
                 base += "/"
 
-            def _list_dir(path):
-                try:
-                    content = self.client.list(path)
-                    for item in content:
-                        if item.is_file:
-                            item_path = getattr(item, "path", "").replace("\\", "/")
-                            if item_path.startswith(base):
-                                relative_path = item_path[len(base) :]
-                            else:
-                                relative_path = item_path.lstrip("/")
-                            files.append(
-                                {
-                                    "relative_path": relative_path,
-                                    "file_name": os.path.basename(item_path),
-                                    "md5": getattr(item, "md5", None),
-                                }
-                            )
-                        elif item.is_dir:
-                            _list_dir(item.path)
-                except Exception as exc:
-                    error_info = classify_storage_error(exc)
-                    if path == normalized_dir_path and (
-                        error_info.kind == "missing_path" or error_info.code == "31023"
-                    ):
-                        return
-                    handle_error_and_notify(
-                        exc,
-                        f"列出目录内容时发生错误\n目录路径: {path}",
-                        self.wechat_notifier,
-                        None,
-                        collect=False,
+            for item in self._iter_local_tree_items(
+                normalized_dir_path,
+                missing_ok=lambda current_path: current_path == normalized_dir_path,
+            ):
+                if item.is_file:
+                    item_path = getattr(item, "path", "").replace("\\", "/")
+                    files.append(
+                        {
+                            "relative_path": self._relative_item_path(item_path, base),
+                            "file_name": os.path.basename(item_path),
+                            "md5": getattr(item, "md5", None),
+                        }
                     )
-                    raise
 
-            _list_dir(normalized_dir_path)
             if use_cache:
                 self._local_files_cache[normalized_dir_path] = [dict(item) for item in files]
             return files

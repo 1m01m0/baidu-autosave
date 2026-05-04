@@ -4,25 +4,54 @@
 import re
 
 
-def apply_regex_rules(file_path, regex_pattern=None, regex_replace=None):
+_WINDOWS_DRIVE_PATTERN = re.compile(r"^[A-Za-z]:")
+REGEX_FILTER_UNMATCHED = "unmatched"
+REGEX_FILTER_UNSAFE_REPLACE = "unsafe_replace"
+
+
+def is_safe_relative_target_path(path):
+    try:
+        normalized = str(path).replace("\\", "/")
+    except Exception:
+        return False
+    if "\x00" in normalized:
+        return False
+    normalized = normalized.strip()
+    if not normalized or normalized.startswith("/"):
+        return False
+    if _WINDOWS_DRIVE_PATTERN.match(normalized):
+        return False
+    return all(part not in ("", ".", "..") for part in normalized.split("/"))
+
+
+def apply_regex_rules_detail(file_path, regex_pattern=None, regex_replace=None):
     if not regex_pattern:
-        return True, file_path
+        return True, file_path, None
 
     try:
         match = re.search(regex_pattern, file_path)
         if not match:
-            return False, file_path
+            return False, file_path, REGEX_FILTER_UNMATCHED
 
         if regex_replace and regex_replace.strip():
             new_path = re.sub(regex_pattern, regex_replace, file_path)
             if new_path != file_path:
-                return True, new_path
+                if not is_safe_relative_target_path(new_path):
+                    return False, file_path, REGEX_FILTER_UNSAFE_REPLACE
+                return True, new_path, None
 
-        return True, file_path
+        return True, file_path, None
     except re.error:
-        return True, file_path
+        return True, file_path, None
     except Exception:
-        return True, file_path
+        return True, file_path, None
+
+
+def apply_regex_rules(file_path, regex_pattern=None, regex_replace=None):
+    should_transfer, final_path, _ = apply_regex_rules_detail(
+        file_path, regex_pattern, regex_replace
+    )
+    return should_transfer, final_path
 
 
 def _matches_folder_filter(folder_name, folder_filter):

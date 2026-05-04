@@ -224,6 +224,36 @@ class ValidateRuntimeConfigTests(unittest.TestCase):
 
         self.assertTrue(any("Python re.sub()" in msg for msg in result["warnings"]))
 
+    def test_validate_runtime_config_rejects_unsafe_regex_replace(self):
+        for regex_replace in ("../\\1", "/\\1", "a/../../evil.txt", r"C:\\evil.txt"):
+            with self.subTest(regex_replace=regex_replace):
+                result = validate_runtime_config(
+                    {
+                        "cookies": "BDUSS=foo; STOKEN=bar",
+                        "share_urls": "https://pan.baidu.com/s/abc12345",
+                        "regex_pattern": r"(.+)\.txt$",
+                        "regex_replace": regex_replace,
+                    }
+                )
+
+                self.assertTrue(any("不能生成绝对路径" in msg for msg in result["errors"]))
+
+    def test_validate_runtime_config_allows_safe_regex_replace_backreferences(self):
+        result = validate_runtime_config(
+            {
+                "cookies": "BDUSS=foo; STOKEN=bar",
+                "share_urls": [
+                    {
+                        "share_url": "https://pan.baidu.com/s/abc12345",
+                        "regex_pattern": r"(.+)\.txt$",
+                        "regex_replace": r"new/\1.txt",
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual([], result["errors"])
+
 
 class LoadRuntimeConfigTests(unittest.TestCase):
     def test_load_runtime_config_prefers_file_config(self):

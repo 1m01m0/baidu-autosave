@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 import tempfile
 import types
@@ -201,9 +202,55 @@ class TransferRunnerSmokeTests(unittest.TestCase):
             transfer_runner.save_failed_transfer_records(records, path)
             self.assertEqual(records, transfer_runner.load_failed_transfer_records(path))
             self.assertEqual(0o600, path.stat().st_mode & 0o777)
+            self.assertEqual([], list(Path(tmpdir).glob("failed.json.*.tmp")))
 
             transfer_runner.save_failed_transfer_records([], path)
             self.assertFalse(path.exists())
+
+    def test_save_failed_transfer_records_temp_file_is_private_while_writing(self):
+        records = [
+            {
+                "share_config": {"share_url": "https://pan.baidu.com/s/abc12345"},
+                "failed_files": [{"fs_id": 1}],
+            }
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "failed.json"
+            original_dump = transfer_runner.json.dump
+            modes = []
+
+            def dump_and_capture_mode(*args, **kwargs):
+                modes.extend(
+                    tmp_path.stat().st_mode & 0o777
+                    for tmp_path in Path(tmpdir).glob("failed.json.*.tmp")
+                )
+                return original_dump(*args, **kwargs)
+
+            with patch.object(transfer_runner.json, "dump", side_effect=dump_and_capture_mode):
+                transfer_runner.save_failed_transfer_records(records, path)
+
+        self.assertEqual([0o600], modes)
+
+    def test_save_failed_transfer_records_cleans_temp_file_on_write_error(self):
+        records = [
+            {
+                "share_config": {"share_url": "https://pan.baidu.com/s/abc12345"},
+                "failed_files": [{"fs_id": 1}],
+            }
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "failed.json"
+            path.write_text("old", encoding="utf-8")
+            os.chmod(path, 0o600)
+
+            with patch.object(transfer_runner.json, "dump", side_effect=RuntimeError("boom")):
+                with self.assertRaises(RuntimeError):
+                    transfer_runner.save_failed_transfer_records(records, path)
+
+            self.assertEqual("old", path.read_text(encoding="utf-8"))
+            self.assertEqual([], list(Path(tmpdir).glob("failed.json.*.tmp")))
 
     def test_load_failed_transfer_records_raises_for_bad_json(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -263,6 +310,116 @@ class TransferRunnerSmokeTests(unittest.TestCase):
         self.assertFalse(records[0]["retryable"])
         self.assertEqual("missing_path", records[0]["error_kind"])
         self.assertFalse(records[0]["failed_files"][0]["retryable"])
+
+    def test_build_failed_transfer_records_minimizes_persisted_file_fields(self):
+        result = {
+            "results": [
+                {
+                    "retry_config": {
+                        "share_url": "https://pan.baidu.com/s/abc12345",
+                        "save_dir": "/a",
+                        "cookies": "BDUSS=secret",
+                    },
+                    "transfer_failed_files": [
+                        {
+                            "fs_id": 1,
+                            "target_dir": "/a",
+                            "dir_path": "/a/sub",
+                            "path": "legacy.txt",
+                            "clean_path": "sub/a.txt",
+                            "final_path": "sub/b.txt",
+                            "need_rename": True,
+                            "error": "boom",
+                            "error_code": "4",
+                            "attempts": 1,
+                            "md5": "secret-md5",
+                        }
+                    ],
+                    "error": "boom",
+                    "debug": "drop-me",
+                }
+            ]
+        }
+
+        with patch.object(transfer_runner, "_current_timestamp", return_value=123):
+            records = transfer_runner.build_failed_transfer_records(result)
+
+        self.assertEqual(1, len(records))
+        record = records[0]
+        self.assertEqual(
+            {
+                "schema_version",
+                "share_config",
+                "failed_files",
+                "error",
+                "error_kind",
+                "retryable",
+                "temporary",
+                "failed_at",
+                "last_failed_at",
+                "attempts",
+            },
+            set(record),
+        )
+        self.assertEqual(
+            {"share_url": "https://pan.baidu.com/s/abc12345", "save_dir": "/a"},
+            record["share_config"],
+        )
+        self.assertEqual(
+            {
+                "fs_id",
+                "dir_path",
+                "clean_path",
+                "final_path",
+                "error",
+                "error_kind",
+                "retryable",
+                "temporary",
+                "failed_at",
+            },
+            set(record["failed_files"][0]),
+        )
+        self.assertEqual("sub/a.txt", record["failed_files"][0]["clean_path"])
+        self.assertEqual(123, record["failed_files"][0]["failed_at"])
+
+    def test_merge_failed_transfer_records_trims_legacy_record_fields(self):
+        record = {
+            "schema_version": 1,
+            "share_config": {
+                "share_url": "https://pan.baidu.com/s/abc12345",
+                "save_dir": "/a",
+                "cookies": "BDUSS=secret",
+            },
+            "failed_files": [
+                {
+                    "fs_id": 1,
+                    "path": "legacy.txt",
+                    "target_dir": "/a",
+                    "need_rename": True,
+                    "error": "boom",
+                    "error_code": "4",
+                    "attempts": 1,
+                }
+            ],
+            "error": "boom",
+            "attempts": 1,
+            "debug": "drop-me",
+        }
+
+        with patch.object(transfer_runner, "_current_timestamp", return_value=456):
+            merged = transfer_runner.merge_failed_transfer_records([record])
+
+        self.assertEqual(1, len(merged))
+        self.assertNotIn("debug", merged[0])
+        self.assertEqual(
+            {"share_url": "https://pan.baidu.com/s/abc12345", "save_dir": "/a"},
+            merged[0]["share_config"],
+        )
+        self.assertEqual("legacy.txt", merged[0]["failed_files"][0]["clean_path"])
+        self.assertNotIn("target_dir", merged[0]["failed_files"][0])
+        self.assertNotIn("need_rename", merged[0]["failed_files"][0])
+        self.assertNotIn("error_code", merged[0]["failed_files"][0])
+        self.assertNotIn("attempts", merged[0]["failed_files"][0])
 
     def test_split_failed_transfer_records_by_status(self):
         retryable = {"share_config": {"share_url": "url-1"}, "attempts": 1}

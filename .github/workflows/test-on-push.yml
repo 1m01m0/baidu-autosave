@@ -24,6 +24,66 @@ jobs:
     - name: Lint GitHub Actions workflows
       uses: rhysd/actionlint@v1
 
+  quality-security:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        persist-credentials: false
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+        cache: 'pip'
+        cache-dependency-path: |
+          requirements.txt
+          requirements-test.txt
+          requirements-quality.txt
+          constraints.txt
+
+    - name: Install dependencies
+      run: bash scripts/install_dependencies.sh quality
+
+    - name: Run quality and security checks
+      run: |
+        python -m compileall -q -x 'vendor/' .
+        python -m ruff check . --exclude vendor --select E9,F63,F7,F82
+        python -m pip check
+        python -m pip_audit -r requirements.txt -r requirements-test.txt -r requirements-quality.txt
+
+  dependency-lock:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.10', '3.11', '3.12']
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        persist-credentials: false
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+        cache: 'pip'
+        cache-dependency-path: |
+          requirements.txt
+          requirements-test.txt
+          requirements-quality.txt
+          constraints.txt
+
+    - name: Install dependencies
+      run: bash scripts/install_dependencies.sh quality
+
+    - name: Check dependency lock
+      run: python scripts/check_dependency_lock.py
+
   tests:
     runs-on: ubuntu-latest
     strategy:
@@ -46,11 +106,10 @@ jobs:
         cache-dependency-path: |
           requirements.txt
           requirements-test.txt
+          constraints.txt
 
     - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt -r requirements-test.txt
+      run: bash scripts/install_dependencies.sh test
 
     - name: Build BaiduPCS-Py submodule
       run: |
