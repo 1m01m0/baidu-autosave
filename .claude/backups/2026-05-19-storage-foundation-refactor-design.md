@@ -37,15 +37,13 @@ Location: `storage_models.py`
 - `failed_files: list = field(default_factory=list)`
 - `skipped_count: int = 0`
 - `error_details: str | None = None`
-- `skipped: bool = False`, used only to preserve existing skipped-result dictionaries
 
 Rules:
 
 - `success=True` with non-empty `failed_files` is invalid and raises `ValueError` in `__post_init__`.
 - `to_dict()` returns the existing result dictionary shape used by current storage code.
 - `from_dict()` reconstructs a `TransferResult` from that dictionary shape.
-- `from_dict()` only requires `success`; missing optional fields default to the current public result semantics.
-- `from_dict()` raises `KeyError("success")` when `success` is absent.
+- `from_dict()` raises `KeyError` when required keys are absent.
 
 Dictionary output keys:
 
@@ -61,7 +59,6 @@ Dictionary output keys:
 - `transfer_success_count`
 - `skipped_count`
 - `error`, only when `error_details` is not `None`
-- `skipped`, only when `skipped` is `True`
 
 ### TransferResultBuilder
 
@@ -83,7 +80,6 @@ Default success inference:
 - If `failed_files` is non-empty and `partial` is false, the result is unsuccessful.
 - If `partial` is true, the result is partial and unsuccessful, while still carrying transferred and failed file lists.
 - Otherwise the result is successful.
-- The builder is a one-shot helper: after `build()` succeeds, another `build()` or any mutator call raises `RuntimeError` to prevent cross-result state reuse.
 
 ### ProgressReporter
 
