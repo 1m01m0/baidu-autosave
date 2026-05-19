@@ -73,6 +73,7 @@ class TransferResult:
     failed_files: list = field(default_factory=list)
     skipped_count: int = 0
     error_details: Optional[str] = None
+    skipped: bool = False
 
     def __post_init__(self):
         if self.success and self.failed_files:
@@ -92,6 +93,8 @@ class TransferResult:
             "transfer_success_count": len(self.transferred_files),
             "skipped_count": self.skipped_count,
         }
+        if self.skipped:
+            result["skipped"] = True
         if self.error_details is not None:
             result["error"] = self.error_details
         return result
@@ -108,6 +111,7 @@ class TransferResult:
             failed_files=list(data.get("transfer_failed_files", [])),
             skipped_count=data.get("skipped_count", 0),
             error_details=data.get("error"),
+            skipped=data.get("skipped", False),
         )
 
 
@@ -119,38 +123,50 @@ class TransferResultBuilder:
         self._message = ""
         self._error_details = None
         self._partial = False
+        self._built = False
+
+    def _ensure_not_built(self):
+        if self._built:
+            raise RuntimeError("TransferResultBuilder 已完成构建，不能重复使用")
 
     def add_transferred(self, file_info):
+        self._ensure_not_built()
         self._transferred_files.append(file_info)
         return self
 
     def add_failed(self, file_info):
+        self._ensure_not_built()
         self._failed_files.append(file_info)
         return self
 
     def set_skipped(self, count):
+        self._ensure_not_built()
         self._skipped_count = count
         return self
 
     def set_message(self, message):
+        self._ensure_not_built()
         self._message = message
         return self
 
     def set_error(self, details):
+        self._ensure_not_built()
         self._error_details = details
         return self
 
     def set_partial(self, partial=True):
+        self._ensure_not_built()
         self._partial = partial
         return self
 
     def build(self):
+        self._ensure_not_built()
         success = (
             not self._partial
             and self._error_details is None
             and not self._failed_files
         )
-        return TransferResult(
+        result = TransferResult(
             success=success,
             partial=self._partial,
             message=self._message,
@@ -159,6 +175,8 @@ class TransferResultBuilder:
             skipped_count=self._skipped_count,
             error_details=self._error_details,
         )
+        self._built = True
+        return result
 
 
 @dataclass

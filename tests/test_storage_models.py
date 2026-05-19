@@ -44,6 +44,23 @@ class TransferResultTests(unittest.TestCase):
                 failed_files=[{"path": "failed.mp4"}],
             )
 
+    def test_success_to_dict_omits_skipped_when_not_skipped(self):
+        result = TransferResult(success=True)
+
+        self.assertNotIn("skipped", result.to_dict())
+
+    def test_default_file_lists_are_not_shared(self):
+        first = TransferResult(success=True)
+        second = TransferResult(success=True)
+
+        self.assertIsNot(first.transferred_files, second.transferred_files)
+        self.assertIsNot(first.failed_files, second.failed_files)
+
+        first.transferred_files.append({"path": "first.mp4"})
+
+        self.assertEqual([], second.transferred_files)
+        self.assertEqual([], second.failed_files)
+
     def test_from_dict_reconstructs_result(self):
         result = TransferResult.from_dict(
             {
@@ -87,12 +104,14 @@ class TransferResultTests(unittest.TestCase):
         )
 
         self.assertTrue(result.success)
+        self.assertTrue(result.skipped)
         self.assertFalse(result.partial)
         self.assertEqual("没有新文件", result.message)
         self.assertEqual([], result.transferred_files)
         self.assertEqual([], result.failed_files)
         self.assertEqual(0, result.skipped_count)
         self.assertIsNone(result.error_details)
+        self.assertIs(result.to_dict()["skipped"], True)
 
     def test_from_dict_requires_success_key(self):
         with self.assertRaisesRegex(KeyError, "success"):
@@ -159,6 +178,20 @@ class TransferResultBuilderTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertFalse(result.partial)
         self.assertEqual("", result.error_details)
+
+    def test_builder_raises_when_built_twice(self):
+        builder = TransferResultBuilder()
+        builder.build()
+
+        with self.assertRaisesRegex(RuntimeError, "TransferResultBuilder"):
+            builder.build()
+
+    def test_builder_raises_when_mutated_after_build(self):
+        builder = TransferResultBuilder()
+        builder.build()
+
+        with self.assertRaisesRegex(RuntimeError, "TransferResultBuilder"):
+            builder.set_message("完成")
 
 
 if __name__ == "__main__":
