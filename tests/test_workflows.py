@@ -119,7 +119,7 @@ class WorkflowStaticTests(unittest.TestCase):
 
         self.assertIs(lock_job["strategy"]["fail-fast"], False)
         self.assertEqual(
-            ["3.9", "3.10", "3.11", "3.12"],
+            ["3.9", "3.12"],
             lock_job["strategy"]["matrix"]["python-version"],
         )
         checkout_steps = steps_using(lock_job["steps"], "actions/checkout@v4")
@@ -204,7 +204,7 @@ class WorkflowStaticTests(unittest.TestCase):
         )
         self.assertIs(test_job["strategy"]["fail-fast"], False)
         self.assertEqual(
-            ["3.9", "3.10", "3.11", "3.12"],
+            ["3.9", "3.12"],
             test_job["strategy"]["matrix"]["python-version"],
         )
 

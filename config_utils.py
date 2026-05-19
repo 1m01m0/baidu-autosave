@@ -83,10 +83,15 @@ def _parse_share_url(value: Any, require_full: bool = False) -> Optional[Dict[st
 
 
 def _normalize_share_object(item: Dict[str, Any]) -> Dict[str, Any]:
+    """归一化对象式 share_urls 项；解析失败时保持原值，
+    最终由 ``validate_runtime_config`` 复查并产出明确错误，
+    避免在 normalize 阶段吞掉异常导致排错困难。
+    """
     share_config = dict(item)
     try:
         parsed = _parse_share_url(share_config.get("share_url"), require_full=True)
     except ValueError:
+        # share_url 含非法 pwd 等，留给校验阶段统一报错
         return share_config
     if parsed:
         share_config["share_url"] = parsed["share_url"]
@@ -332,6 +337,17 @@ def build_share_urls_text(
 
 
 def load_runtime_config(config_path: Union[Path, str] = "config.json") -> Dict[str, Any]:
+    """读取运行时配置。
+
+    优先级与回退策略：
+
+    1. 优先读取 ``config.json``（或 ``config_path``）；
+    2. 仅当文件 **不存在** （``FileNotFoundError``）时回退到环境变量；
+       JSON 解析失败、权限错误等其他异常一律向上抛出，避免静默用环境变量
+       覆盖一个用户期望存在但损坏的配置。
+    3. 任何来源都必须包含 ``cookies`` 与 ``share_urls``，否则抛 ``ValueError``。
+    4. 最后通过 ``validate_runtime_config`` 做语义校验，校验失败抛 ``ValueError``。
+    """
     path = resolve_config_path(config_path)
 
     try:

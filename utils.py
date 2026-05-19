@@ -1,35 +1,61 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""错误收集 / 通知 / 敏感信息脱敏的统一入口。
 
-import traceback
-from typing import Optional, Dict, Any, List, Set, Tuple
-from collections import defaultdict
-import threading
+公共 API（被 storage.py / wechat_notifier.py / transfer_runner.py 使用）：
+
+- 脱敏：``mask_sensitive``、``mask_cookies``、``mask_share_url``
+- 错误收集：``ErrorCollector``、``error_collection``、
+  ``start_error_collection``、``collect_error``、
+  ``send_collected_errors``、``end_error_collection``
+- 错误处理：``handle_error_and_notify``、``print_detailed_error``、
+  ``format_error_info``、``send_wechat_alert``
+- 结果聚合：``collect_transferred_files``
+
+模块仅依赖标准库；与 ``wechat_notifier`` 之间通过结构化协议交互
+（外部传入的 notifier 只需提供 ``send_error_notification`` 方法），
+避免双向 import。
+"""
+
+from __future__ import annotations
+
 import re
+import threading
+import traceback
+from collections import defaultdict
+from contextlib import contextmanager
+from typing import Any, Dict, Iterable, List, Optional, Pattern, Tuple
 
-# 延迟导入以避免循环依赖
-try:
-    from wechat_notifier import WeChatNotifier
-except ImportError:
-    WeChatNotifier = None  # type: ignore
+# ============================================================================
+# 1. 公共常量
+# ============================================================================
+
+MASK_REPLACEMENT = "***"
 
 
-# 用于存储错误信息的全局字典，按线程ID分组
-_error_collections: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
-_collection_lock = threading.Lock()
+# ============================================================================
+# 2. 敏感信息脱敏
+# ============================================================================
+#
+# 设计要点：
+# - 所有正则集中预编译，避免重复 re.compile
+# - mask_sensitive 一次性遍历一组 (pattern, replacement) 规则，从而把所有
+#   敏感字段替换完毕；调用方按需选择 mask_share_url / mask_cookies。
 
-# 预编译正则表达式以提高性能
+_SHARE_LINK_TOKEN_PATTERN = re.compile(
+    r"(https?://pan\.baidu\.com/s/)([A-Za-z0-9_-]+)", re.IGNORECASE
+)
+_SHARE_SURL_TOKEN_PATTERN = re.compile(r"(\bsurl=)([A-Za-z0-9_-]+)", re.IGNORECASE)
 _PWD_PATTERN = re.compile(
     r"(((?<![A-Za-z0-9_])pwd|密码|提取码)\s*[:：=]?\s*)([A-Za-z0-9]{4})",
     re.IGNORECASE,
 )
 _UK_PATTERN = re.compile(r"(\buk\s*[:=]\s*)(\d+)", re.IGNORECASE)
 _SHARE_ID_PATTERN = re.compile(r"(\bshare_?id\s*[:=]\s*)(\d+)", re.IGNORECASE)
-_BDSTOKEN_PATTERN = re.compile(
-    r"(\bbdstoken\s*[:=]\s*)([A-Za-z0-9_-]+)", re.IGNORECASE
-)
+_BDSTOKEN_PATTERN = re.compile(r"(\bbdstoken\s*[:=]\s*)([A-Za-z0-9_-]+)", re.IGNORECASE)
 _TOKEN_PATTERN = re.compile(
-    r"((?:\baccess_token\b|\brefresh_token\b|\btoken\b)\s*[:=]\s*)([A-Za-z0-9._~+/=-]{6,})",
+    r"((?:\baccess_token\b|\brefresh_token\b|\btoken\b)\s*[:=]\s*)"
+    r"([A-Za-z0-9._~+/=-]{6,})",
     re.IGNORECASE,
 )
 _AUTHORIZATION_BEARER_PATTERN = re.compile(
@@ -37,378 +63,9 @@ _AUTHORIZATION_BEARER_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _WEBHOOK_KEY_PATTERN = re.compile(r"(\bkey=)([^&\s]+)", re.IGNORECASE)
-_SHARE_LINK_TOKEN_PATTERN = re.compile(
-    r"(https?://pan\.baidu\.com/s/)([A-Za-z0-9_-]+)", re.IGNORECASE
-)
-_SHARE_SURL_TOKEN_PATTERN = re.compile(
-    r"(\bsurl=)([A-Za-z0-9_-]+)", re.IGNORECASE
-)
 
 
-def mask_share_url(text: Optional[str]) -> Optional[str]:
-    """掩码百度网盘分享链接，仅隐藏链接标识。"""
-    if text is None:
-        return text
-
-    masked = _SHARE_LINK_TOKEN_PATTERN.sub(r"\1***", str(text))
-    return _SHARE_SURL_TOKEN_PATTERN.sub(r"\1***", masked)
-
-
-
-def collect_transferred_files(result: Optional[Dict[str, Any]]) -> List[str]:
-    """从单个或批量转存结果中提取成功转存的文件列表。"""
-    if not isinstance(result, dict):
-        return []
-
-    if "results" not in result:
-        return list(result.get("transferred_files", []))
-
-    transferred_files = []
-    for item in result["results"]:
-        if item.get("success") and not item.get("skipped"):
-            transferred_files.extend(item.get("transferred_files", []))
-    return transferred_files
-
-
-
-def mask_sensitive(text: Optional[str]) -> Optional[str]:
-    """
-    掩码敏感信息（cookie、pwd、token、webhook key、分享链接等）。
-    """
-    if text is None:
-        return text
-
-    masked = mask_cookies(str(text))
-    masked = _PWD_PATTERN.sub(r"\1***", masked)
-    masked = _UK_PATTERN.sub(r"\1***", masked)
-    masked = _SHARE_ID_PATTERN.sub(r"\1***", masked)
-    masked = _BDSTOKEN_PATTERN.sub(r"\1***", masked)
-    masked = _TOKEN_PATTERN.sub(r"\1***", masked)
-    masked = _AUTHORIZATION_BEARER_PATTERN.sub(r"\1***", masked)
-    masked = _WEBHOOK_KEY_PATTERN.sub(r"\1***", masked)
-    masked = _SHARE_LINK_TOKEN_PATTERN.sub(r"\1***", masked)
-    masked = _SHARE_SURL_TOKEN_PATTERN.sub(r"\1***", masked)
-    return masked
-
-
-def _mask_sensitive(text: Optional[str]) -> Optional[str]:
-    """兼容旧调用，实际委托给统一脱敏入口。"""
-    return mask_sensitive(text)
-
-
-def _format_error_base(error: Exception, context: str = "") -> str:
-    """
-    统一格式化错误信息的基础部分
-    """
-    return (
-        f"发生异常: {context}\n"
-        f"  错误类型: {type(error).__name__}\n"
-        f"  错误信息: {str(error)}\n"
-        f"  详细堆栈: {traceback.format_exc()}"
-    )
-
-
-def print_detailed_error(
-    error: Exception,
-    context: str = "",
-    wechat_notifier: Optional[Any] = None,
-    config: Optional[Dict[str, Any]] = None,
-) -> None:
-    """
-    仅打印详细的错误信息（不直接发送通知），并对敏感信息进行掩码
-
-    Args:
-        error: 异常对象
-        context: 错误上下文信息
-        wechat_notifier: 微信通知器实例（未使用，为兼容性保留）
-        config: 配置信息（未使用，为兼容性保留）
-    """
-    base = _format_error_base(error, context)
-    masked = _mask_sensitive(base)
-    print(masked if masked is not None else base)
-    # 不在此处发送企业微信通知，避免与上层统一处理重复发送
-
-
-def format_error_info(error: Exception, context: str = "") -> str:
-    """
-    格式化错误信息（包含敏感信息掩码）
-
-    Args:
-        error: 异常对象
-        context: 错误上下文信息
-
-    Returns:
-        已掩码的错误信息字符串
-    """
-    base = _format_error_base(error, context)
-    masked = _mask_sensitive(base)
-    return masked if masked is not None else base
-
-
-def send_wechat_alert(
-    wechat_notifier: Optional[Any],
-    error: Exception,
-    context: str = "",
-    config: Optional[Dict[str, Any]] = None,
-) -> None:
-    """
-    发送微信告警
-
-    Args:
-        wechat_notifier: 微信通知器实例
-        error: 异常对象
-        context: 错误上下文信息
-        config: 配置信息
-    """
-    if wechat_notifier:
-        detailed_error = _format_error_base(error, context)
-        masked_error = _mask_sensitive(detailed_error)
-        # 统一掩码，send_error_notification 会自动包含 GitHub Actions 详情
-        wechat_notifier.send_error_notification(
-            masked_error if masked_error is not None else detailed_error, config
-        )
-
-
-def start_error_collection(context: str = "") -> None:
-    """
-    开始错误收集
-
-    Args:
-        context: 错误上下文信息
-    """
-    thread_id = threading.get_ident()
-    with _collection_lock:
-        _error_collections[thread_id].append(
-            {"context": context, "errors": [], "seen": set()}
-        )
-
-
-def _has_active_collection() -> bool:
-    """
-    检查当前线程是否有活跃的错误收集上下文（线程安全，不持有锁）
-
-    Returns:
-        是否有活跃的错误收集上下文
-    """
-    thread_id = threading.get_ident()
-    with _collection_lock:
-        return bool(
-            thread_id in _error_collections and _error_collections[thread_id]
-        )
-
-
-def collect_error(error: Exception, context: str = "") -> bool:
-    """
-    收集错误信息（线程安全，支持去重）
-
-    Args:
-        error: 异常对象
-        context: 错误上下文信息
-
-    Returns:
-        bool: True 表示成功收集，False 表示没有活跃的收集上下文或已去重
-
-    Note:
-        错误会被去重，相同类型、消息和上下文的错误只会收集一次
-    """
-    thread_id = threading.get_ident()
-    with _collection_lock:
-        if not (
-            thread_id in _error_collections and _error_collections[thread_id]
-        ):
-            return False  # 没有活跃的错误收集上下文
-
-        # 构造去重键：类型 + 消息 + 归一化上下文
-        etype = type(error).__name__
-        emsg = str(error)
-        ectx = str(context)
-        key = f"{etype}|{emsg}|{ectx}"
-
-        stack = _error_collections[thread_id][-1]
-        seen: Set[str] = stack.get("seen", set())
-        if key in seen:
-            return False  # 已收集，跳过
-
-        seen.add(key)
-        error_info = {
-            "type": etype,
-            "message": emsg,
-            "context": ectx,
-            "traceback": traceback.format_exc(),
-        }
-        stack["errors"].append(error_info)
-        return True
-
-
-def send_collected_errors(
-    wechat_notifier: Optional[Any], config: Optional[Dict[str, Any]] = None
-) -> None:
-    """
-    发送收集到的错误信息（线程安全）
-    注意：GitHub Actions 详情会自动包含在错误通知中
-
-    Args:
-        wechat_notifier: 微信通知器实例
-        config: 配置信息
-    """
-    if not wechat_notifier:
-        return
-
-    thread_id = threading.get_ident()
-    # 先获取数据，然后释放锁再调用外部函数，避免死锁
-    error_message = None
-    with _collection_lock:
-        if not (
-            thread_id in _error_collections and _error_collections[thread_id]
-        ):
-            return
-
-        collection = _error_collections[thread_id][-1]
-        errors = collection.get("errors", [])
-
-        if errors:
-            # 构建整合的错误消息（在持有锁时构建，避免数据竞争）
-            error_message = (
-                f"方法调用过程中发生一系列错误\n"
-                f"主上下文: {collection['context']}\n\n"
-            )
-            for i, error_info in enumerate(errors, 1):
-                error_message += (
-                    f"{i}. {error_info['context']}\n"
-                    f"   错误类型: {error_info['type']}\n"
-                    f"   错误信息: {error_info['message']}\n"
-                    f"   详细堆栈:\n{error_info['traceback']}\n\n"
-                )
-
-        # 清除已发送的错误（不在此处 pop，由 end_error_collection 统一处理）
-
-    # 在锁外调用外部函数，避免死锁
-    # send_error_notification 会自动包含 GitHub Actions 详情
-    if error_message:
-        masked_message = _mask_sensitive(error_message.strip())
-        wechat_notifier.send_error_notification(
-            masked_message if masked_message is not None else error_message.strip(),
-            config,
-        )
-
-
-def end_error_collection() -> None:
-    """
-    结束错误收集（仅弹出当前栈顶，支持嵌套）
-
-    Note:
-        此函数会弹出当前线程的错误收集栈顶，如果栈为空则删除线程项
-    """
-    thread_id = threading.get_ident()
-    with _collection_lock:
-        if thread_id in _error_collections:
-            if _error_collections[thread_id]:
-                _error_collections[thread_id].pop()
-            # 若栈空则删除该线程项
-            if not _error_collections[thread_id]:
-                del _error_collections[thread_id]
-
-
-def handle_error_and_notify(
-    error: Exception,
-    context: str,
-    wechat_notifier: Optional[Any],
-    config: Optional[Dict[str, Any]] = None,
-    collect: bool = True,
-) -> None:
-    """
-    统一处理错误：收集错误、打印详细信息，并在需要时发送微信告警
-
-    Args:
-        error: 异常对象
-        context: 错误上下文信息
-        wechat_notifier: 微信通知器实例
-        config: 配置信息
-        collect: 是否收集错误（True 表示纳入聚合，由 ErrorCollector 统一发送；False 表示立即发送一次）
-
-    Note:
-        - 当 collect=True 时，错误会被收集到 ErrorCollector 中，稍后统一发送
-        - 当 collect=False 且当前没有活跃的 ErrorCollector 时，会立即发送告警
-        - 避免重复告警：在 ErrorCollector 作用域内不会立即发送
-    """
-    # 收集错误（如果 collect=True，会检查是否有活跃的收集上下文）
-    if collect:
-        collect_error(error, context)
-    
-    # 检查是否存在活跃的错误收集上下文（在锁外调用，避免重复获取锁）
-    has_collection = _has_active_collection()
-
-    # 仅打印详细的错误信息（不直接发送），避免重复
-    print_detailed_error(error, context, wechat_notifier, config)
-
-    # 立即发送一次（仅当未聚合且当前没有收集上下文时）
-    if not collect and not has_collection and wechat_notifier:
-        send_wechat_alert(wechat_notifier, error, context, config)
-
-
-# ========== 敏感信息掩码与错误收集上下文管理器 ==========
-
-from contextlib import contextmanager
-
-MASK_REPLACEMENT = "***"
-
-
-def mask(
-    text: Optional[str],
-    patterns: Any,
-    replacement: str = MASK_REPLACEMENT,
-) -> Optional[str]:
-    """
-    通用敏感信息掩码工具。
-
-    Args:
-        text: 原始文本
-        patterns: 掩码模式
-            - 字符串或正则对象，或其列表/元组
-            - 若为字符串，直接整体替换为 replacement
-            - 若为正则，优先替换第1个捕获组；无捕获组则整体匹配替换
-        replacement: 替换用的掩码（默认 ***）
-
-    Returns:
-        已掩码文本，如果输入为 None 则返回 None
-    """
-    if text is None:
-        return text
-    if not isinstance(patterns, (list, tuple)):
-        patterns = [patterns]
-    masked = str(text)
-    for pat in patterns:
-        try:
-            if isinstance(pat, str):
-                masked = masked.replace(pat, replacement)
-            else:
-                # 视为正则：若存在捕获组，仅替换第1个捕获组
-                regex = pat if hasattr(pat, "sub") else re.compile(pat)
-
-                def _sub(match: re.Match[str]) -> str:
-                    if match.groups():
-                        g1 = match.group(1)
-                        if g1 is None:
-                            return replacement
-                        start, end = match.start(1), match.end(1)
-                        seg = masked[match.start() : match.end()]
-                        # 将匹配片段中的第1组替换为 replacement
-                        return (
-                            seg[: start - match.start()]
-                            + replacement
-                            + seg[end - match.start() :]
-                        )
-                    return replacement
-
-                masked = regex.sub(_sub, masked)
-        except Exception:
-            # 掩码过程中失败不应影响主流程
-            continue
-    return masked
-
-
-# 预编译 Cookie 掩码正则表达式
-_COOKIE_KEYS = [
+_COOKIE_KEYS: Tuple[str, ...] = (
     "BDUSS_BFESS",
     "STOKEN_BFESS",
     "BAIDUID_BFESS",
@@ -424,67 +81,320 @@ _COOKIE_KEYS = [
     "PANPSC",
     "BA_HECTOR",
     "ZFY",
-]
-_COOKIE_PATTERNS: List[re.Pattern[str]] = []
-for key in _COOKIE_KEYS:
-    _COOKIE_PATTERNS.append(
-        re.compile(
-            rf"((?:['\"]?{key}['\"]?)\s*[:=]\s*['\"]?)([^;,'\"\s}}{{\]]+)(['\"]?)",
-            re.IGNORECASE,
-        )
+)
+
+_COOKIE_PATTERNS: Tuple[Pattern[str], ...] = tuple(
+    re.compile(
+        rf"((?:['\"]?{key}['\"]?)\s*[:=]\s*['\"]?)([^;,'\"\s}}{{\]]+)(['\"]?)",
+        re.IGNORECASE,
     )
+    for key in _COOKIE_KEYS
+)
+
+
+def _cookie_repl(match: "re.Match[str]") -> str:
+    return f"{match.group(1)}{MASK_REPLACEMENT}{match.group(3)}"
+
+
+# 一组通用脱敏规则：每条都是 (compiled pattern, replacement template)。
+# replacement 中使用 \g<1> 引用第一个捕获组，未匹配的捕获组直接被掩码替代。
+_GENERAL_MASK_RULES: Tuple[Tuple[Pattern[str], str], ...] = (
+    (_SHARE_LINK_TOKEN_PATTERN, rf"\g<1>{MASK_REPLACEMENT}"),
+    (_SHARE_SURL_TOKEN_PATTERN, rf"\g<1>{MASK_REPLACEMENT}"),
+    (_PWD_PATTERN, rf"\g<1>{MASK_REPLACEMENT}"),
+    (_UK_PATTERN, rf"\g<1>{MASK_REPLACEMENT}"),
+    (_SHARE_ID_PATTERN, rf"\g<1>{MASK_REPLACEMENT}"),
+    (_BDSTOKEN_PATTERN, rf"\g<1>{MASK_REPLACEMENT}"),
+    (_TOKEN_PATTERN, rf"\g<1>{MASK_REPLACEMENT}"),
+    (_AUTHORIZATION_BEARER_PATTERN, rf"\g<1>{MASK_REPLACEMENT}"),
+    (_WEBHOOK_KEY_PATTERN, rf"\g<1>{MASK_REPLACEMENT}"),
+)
 
 
 def mask_cookies(text: Optional[str]) -> Optional[str]:
-    """
-    针对常见 Cookie 键的掩码（仅隐藏值，不改变原格式）。
-
-    支持常见百度 Cookie，包含 KEY=value、JSON/dict 和冒号格式。
-
-    Args:
-        text: 原始文本
-
-    Returns:
-        已掩码文本，如果输入为 None 则返回 None
-    """
+    """针对常见 Cookie 键的脱敏，仅替换值不破坏原格式。"""
     if text is None:
         return text
-
-    def repl(match: re.Match[str]) -> str:
-        return f"{match.group(1)}{MASK_REPLACEMENT}{match.group(3)}"
-
     masked = str(text)
     for pattern in _COOKIE_PATTERNS:
-        masked = pattern.sub(repl, masked)
+        masked = pattern.sub(_cookie_repl, masked)
     return masked
 
 
-class ErrorCollector:
+def mask_share_url(text: Optional[str]) -> Optional[str]:
+    """掩码百度网盘分享链接 / surl，仅隐藏链接标识。"""
+    if text is None:
+        return text
+    masked = _SHARE_LINK_TOKEN_PATTERN.sub(rf"\g<1>{MASK_REPLACEMENT}", str(text))
+    return _SHARE_SURL_TOKEN_PATTERN.sub(rf"\g<1>{MASK_REPLACEMENT}", masked)
+
+
+def mask_sensitive(text: Optional[str]) -> Optional[str]:
+    """对常见敏感字段（cookie / pwd / token / webhook key / 分享链接）统一脱敏。"""
+    if text is None:
+        return text
+    masked = mask_cookies(str(text))
+    for pattern, replacement in _GENERAL_MASK_RULES:
+        masked = pattern.sub(replacement, masked)
+    return masked
+
+
+# 为兼容历史代码（包括内部调用）保留一个下划线别名
+_mask_sensitive = mask_sensitive
+
+
+# ============================================================================
+# 3. 结果聚合工具
+# ============================================================================
+
+
+def collect_transferred_files(result: Optional[Dict[str, Any]]) -> List[str]:
+    """从单次或批量转存结果中提取成功转存的文件清单。"""
+    if not isinstance(result, dict):
+        return []
+
+    if "results" not in result:
+        return list(result.get("transferred_files", []))
+
+    transferred_files: List[str] = []
+    for item in result["results"]:
+        if item.get("success") and not item.get("skipped"):
+            transferred_files.extend(item.get("transferred_files", []))
+    return transferred_files
+
+
+# ============================================================================
+# 4. 错误信息格式化
+# ============================================================================
+
+
+def _format_error_base(error: BaseException, context: str = "") -> str:
+    return (
+        f"发生异常: {context}\n"
+        f"  错误类型: {type(error).__name__}\n"
+        f"  错误信息: {str(error)}\n"
+        f"  详细堆栈: {traceback.format_exc()}"
+    )
+
+
+def format_error_info(error: BaseException, context: str = "") -> str:
+    """格式化错误信息，自动脱敏。"""
+    base = _format_error_base(error, context)
+    masked = mask_sensitive(base)
+    return masked if masked is not None else base
+
+
+def _emit_error_log(message: str) -> None:
+    """优先使用项目 logger，缺失时回退到 print，确保 GA 日志格式一致。"""
+    try:
+        from logger import get_logger  # 延迟导入避免循环
+    except Exception:
+        print(message)
+        return
+
+    try:
+        get_logger().error(message)
+    except Exception:  # pragma: no cover - logger 异常时退化
+        print(message)
+
+
+def print_detailed_error(
+    error: BaseException,
+    context: str = "",
+    wechat_notifier: Any = None,  # 仅为兼容旧签名，不再使用
+    config: Optional[Dict[str, Any]] = None,  # 同上
+) -> None:
+    """打印（脱敏后）的详细错误堆栈，不直接发送通知。"""
+    _emit_error_log(format_error_info(error, context))
+
+
+def send_wechat_alert(
+    wechat_notifier: Any,
+    error: BaseException,
+    context: str = "",
+    config: Optional[Dict[str, Any]] = None,
+) -> None:
+    """显式发送一次企业微信告警（脱敏 + 自动附带 GitHub Actions 信息）。"""
+    if wechat_notifier is None:
+        return
+    try:
+        wechat_notifier.send_error_notification(format_error_info(error, context), config)
+    except Exception as exc:  # pragma: no cover - 发送失败不再回流给自身
+        _emit_error_log(
+            f"发送企业微信告警失败: {type(exc).__name__}: {exc}"
+        )
+
+
+# ============================================================================
+# 5. 错误收集（线程局部 + 嵌套栈）
+# ============================================================================
+#
+# 每个线程维护一个收集栈：start 入栈、end 出栈。
+# - collect_error 仅写当前栈顶，并按 (type|msg|context) 去重
+# - send_collected_errors 只发送当前栈顶，避免内层把外层的错误吞掉
+# - ErrorCollector 是结构化的 with 入口
+
+_ErrorRecord = Dict[str, Any]
+_CollectionFrame = Dict[str, Any]
+
+_error_collections: Dict[int, List[_CollectionFrame]] = defaultdict(list)
+_collection_lock = threading.Lock()
+
+
+def _new_frame(context: str) -> _CollectionFrame:
+    return {"context": context, "errors": [], "seen": set()}
+
+
+def start_error_collection(context: str = "") -> None:
+    """在当前线程压入一层错误收集帧。"""
+    thread_id = threading.get_ident()
+    with _collection_lock:
+        _error_collections[thread_id].append(_new_frame(context))
+
+
+def end_error_collection() -> None:
+    """弹出当前线程栈顶帧；栈空时清理 thread 项。"""
+    thread_id = threading.get_ident()
+    with _collection_lock:
+        stack = _error_collections.get(thread_id)
+        if not stack:
+            return
+        stack.pop()
+        if not stack:
+            _error_collections.pop(thread_id, None)
+
+
+def _has_active_collection() -> bool:
+    thread_id = threading.get_ident()
+    with _collection_lock:
+        return bool(_error_collections.get(thread_id))
+
+
+def collect_error(error: BaseException, context: str = "") -> bool:
+    """把一个错误写入当前栈顶帧，返回是否成功收集（去重命中时返回 False）。"""
+    thread_id = threading.get_ident()
+    with _collection_lock:
+        stack = _error_collections.get(thread_id)
+        if not stack:
+            return False
+
+        etype = type(error).__name__
+        emsg = str(error)
+        ectx = str(context)
+        key = f"{etype}|{emsg}|{ectx}"
+
+        frame = stack[-1]
+        seen = frame["seen"]
+        if key in seen:
+            return False
+        seen.add(key)
+        frame["errors"].append(
+            {
+                "type": etype,
+                "message": emsg,
+                "context": ectx,
+                "traceback": traceback.format_exc(),
+            }
+        )
+        return True
+
+
+def _format_aggregate_message(frame: _CollectionFrame) -> Optional[str]:
+    errors: Iterable[_ErrorRecord] = frame.get("errors") or []
+    errors = list(errors)
+    if not errors:
+        return None
+
+    parts = [
+        "方法调用过程中发生一系列错误",
+        f"主上下文: {frame['context']}",
+        "",
+    ]
+    for index, error_info in enumerate(errors, 1):
+        parts.append(f"{index}. {error_info['context']}")
+        parts.append(f"   错误类型: {error_info['type']}")
+        parts.append(f"   错误信息: {error_info['message']}")
+        parts.append(f"   详细堆栈:\n{error_info['traceback']}")
+        parts.append("")
+    return "\n".join(parts).strip()
+
+
+def send_collected_errors(
+    wechat_notifier: Any, config: Optional[Dict[str, Any]] = None
+) -> None:
+    """发送当前栈顶帧聚合后的错误（仅发送本层，外层不受影响）。"""
+    if wechat_notifier is None:
+        return
+
+    thread_id = threading.get_ident()
+    with _collection_lock:
+        stack = _error_collections.get(thread_id)
+        if not stack:
+            return
+        message = _format_aggregate_message(stack[-1])
+
+    if not message:
+        return
+
+    masked = mask_sensitive(message) or message
+    try:
+        wechat_notifier.send_error_notification(masked, config)
+    except Exception as exc:  # pragma: no cover
+        _emit_error_log(f"发送聚合错误通知失败: {type(exc).__name__}: {exc}")
+
+
+def handle_error_and_notify(
+    error: BaseException,
+    context: str,
+    wechat_notifier: Any,
+    config: Optional[Dict[str, Any]] = None,
+    collect: bool = True,
+) -> None:
+    """统一的错误处理入口。
+
+    Args:
+        error: 待处理的异常
+        context: 错误上下文，用于打印与聚合
+        wechat_notifier: 企业微信通知器（任意提供 send_error_notification 的对象）
+        config: 配置信息，会透传给通知器
+        collect: True 表示纳入当前 ErrorCollector，由其 with 退出时聚合发送；
+                 False 且当前没有活跃的 collector 时立即发送一次
+
+    保证不会重复告警：如果存在活跃 collector，本函数永远不立即发送。
     """
-    错误收集上下文管理器，用于聚合收集多个错误并统一发送。
+    if collect:
+        collect_error(error, context)
 
-    使用示例：
-        with ErrorCollector("批量转存", wechat_notifier, config) as ec:
+    has_active = _has_active_collection()
+    print_detailed_error(error, context)
+
+    if not collect and not has_active:
+        send_wechat_alert(wechat_notifier, error, context, config)
+
+
+# ============================================================================
+# 6. ErrorCollector 上下文管理器
+# ============================================================================
+
+
+class ErrorCollector:
+    """聚合收集错误并统一发送。
+
+    示例::
+
+        with ErrorCollector("批量转存", notifier, config) as ec:
             try:
-                # 业务代码
-                ...
+                run()
             except Exception as e:
-                ec.capture(e, "子步骤说明")  # 只收集，不中断
-            # 若 with 块抛出未捕获异常，自动收集并原样抛出
-        退出时自动 send_collected_errors 并 end_error_collection
+                ec.capture(e, "子步骤说明")
 
-    Attributes:
-        context: 错误上下文信息
-        wechat_notifier: 微信通知器实例
-        config: 配置信息
-        auto_send: 是否自动发送收集的错误
-        suppress: 是否吞掉异常（True 则吞掉，默认不吞）
+    退出时会发送当前帧聚合后的错误，再弹栈。
     """
 
     def __init__(
         self,
         context: str = "",
-        wechat_notifier: Optional[Any] = None,
+        wechat_notifier: Any = None,
         config: Optional[Dict[str, Any]] = None,
         auto_send: bool = True,
         suppress: bool = False,
@@ -493,95 +403,68 @@ class ErrorCollector:
         self.wechat_notifier = wechat_notifier
         self.config = config
         self.auto_send = auto_send
-        self.suppress = suppress  # True 则吞掉异常（默认不吞）
+        self.suppress = suppress
 
     def __enter__(self) -> "ErrorCollector":
-        """进入上下文管理器，开始错误收集"""
         start_error_collection(self.context)
         return self
 
-    def capture(self, error: Exception, context: str = "") -> bool:
-        """
-        手动采集错误
-
-        Args:
-            error: 异常对象
-            context: 错误上下文信息
-
-        Returns:
-            False，方便在 except 中 `return ec.capture(e)` 模式使用
-        """
-        collect_error(error, context)  # 返回值被忽略，保持原有接口
-        return False
+    def capture(self, error: BaseException, context: str = "") -> bool:
+        collect_error(error, context)
+        return False  # 配合 `return ec.capture(e)` 用法
 
     def __exit__(
         self,
         exc_type: Optional[type],
-        exc: Optional[Exception],
+        exc: Optional[BaseException],
         tb: Optional[Any],
     ) -> bool:
-        """
-        退出上下文管理器，处理收集的错误
-
-        Args:
-            exc_type: 异常类型
-            exc: 异常对象
-            tb: 追溯对象
-
-        Returns:
-            是否吞掉异常（由 suppress 参数决定）
-        """
-        # 未捕获异常也纳入收集
         if exc is not None:
             collect_error(exc, f"{self.context}（未捕获异常）")
-            # 打印详细错误
-            print_detailed_error(
-                exc, self.context, self.wechat_notifier, self.config
-            )
+            print_detailed_error(exc, self.context)
 
-        # 发送聚合错误
-        if self.auto_send:
-            try:
+        try:
+            if self.auto_send:
                 send_collected_errors(self.wechat_notifier, self.config)
-            finally:
-                end_error_collection()
-        else:
+        finally:
             end_error_collection()
 
-        # 返回是否吞掉异常
         return bool(self.suppress)
 
 
 @contextmanager
 def error_collection(
     context: str = "",
-    wechat_notifier: Optional[Any] = None,
+    wechat_notifier: Any = None,
     config: Optional[Dict[str, Any]] = None,
     auto_send: bool = True,
     suppress: bool = False,
 ):
-    """
-    函数式便捷用法（ErrorCollector 的便捷包装器）
-
-    使用示例：
-        with error_collection("ctx", notifier, config) as ec:
-            try:
-                # 业务代码
-                ...
-            except Exception as e:
-                ec.capture(e, "子步骤说明")
-
-    Args:
-        context: 错误上下文信息
-        wechat_notifier: 微信通知器实例
-        config: 配置信息
-        auto_send: 是否自动发送收集的错误
-        suppress: 是否吞掉异常
-
-    Yields:
-        ErrorCollector 实例
-    """
+    """``ErrorCollector`` 的函数式包装，便于 with 语法使用。"""
     with ErrorCollector(
         context, wechat_notifier, config, auto_send, suppress
-    ) as ec:
-        yield ec
+    ) as collector:
+        yield collector
+
+
+# ============================================================================
+# 7. 公共导出
+# ============================================================================
+
+__all__ = [
+    "MASK_REPLACEMENT",
+    "ErrorCollector",
+    "collect_error",
+    "collect_transferred_files",
+    "end_error_collection",
+    "error_collection",
+    "format_error_info",
+    "handle_error_and_notify",
+    "mask_cookies",
+    "mask_sensitive",
+    "mask_share_url",
+    "print_detailed_error",
+    "send_collected_errors",
+    "send_wechat_alert",
+    "start_error_collection",
+]

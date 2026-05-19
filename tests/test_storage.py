@@ -218,6 +218,26 @@ class BaiduStoragePureMethodTests(unittest.TestCase):
         with patch.dict(os.environ, {env_name: "bad"}):
             self.assertEqual(1, _read_positive_int_env(env_name, 1))
 
+    def test_read_non_negative_int_env_accepts_zero_and_falls_back_for_invalid(self):
+        from env_utils import read_non_negative_int_env
+
+        env_name = "TRANSFERSHARE_TEST_NON_NEGATIVE"
+        # 合法 0：与 read_positive_int_env 的关键差异
+        with patch.dict(os.environ, {env_name: "0"}):
+            self.assertEqual(0, read_non_negative_int_env(env_name, 5))
+        # 合法正数
+        with patch.dict(os.environ, {env_name: "32"}):
+            self.assertEqual(32, read_non_negative_int_env(env_name, 5))
+        # 负数回退
+        with patch.dict(os.environ, {env_name: "-1"}):
+            self.assertEqual(5, read_non_negative_int_env(env_name, 5))
+        # 非整数回退
+        with patch.dict(os.environ, {env_name: "bad"}):
+            self.assertEqual(5, read_non_negative_int_env(env_name, 5))
+        # 未设置回退
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(5, read_non_negative_int_env(env_name, 5))
+
     def test_transfer_count_limit_error_detection(self):
         self.assertTrue(is_transfer_count_limit_error("error_code: -33"))
         self.assertTrue(is_transfer_count_limit_error("error_code: 120, message: 转存文件数超限"))
@@ -977,6 +997,65 @@ class StoragePathServiceTests(unittest.TestCase):
             result,
         )
         self.assertNotIn(call("/save/A/other"), client.list.call_args_list)
+
+    def test_list_local_files_in_dirs_concurrent_scan_preserves_order(self):
+        """并发扫描下，结果列表仍按 sorted scan_plan 顺序合并。
+
+        即便 worker 之间 client.list 的真实调用顺序受调度影响，
+        files 的相对顺序应与串行实现一致。
+        """
+        import threading
+
+        client = Mock()
+        listings = {
+            "/save/A": [
+                SimpleNamespace(is_file=True, is_dir=False, path="/save/A/a.txt", md5="md5-a"),
+            ],
+            "/save/B/C": [
+                SimpleNamespace(is_file=True, is_dir=False, path="/save/B/C/c.txt", md5="md5-c"),
+            ],
+        }
+
+        thread_names = set()
+        thread_names_lock = threading.Lock()
+
+        def list_side_effect(path):
+            with thread_names_lock:
+                thread_names.add(threading.current_thread().name)
+            return list(listings[path])
+
+        client.list.side_effect = list_side_effect
+        service = StoragePathService(client)
+
+        with patch("storage_paths.LOCAL_SCAN_CONCURRENCY", 4):
+            result = service.list_local_files_in_dirs("/save", {"A", "B/C"})
+
+        # 结果顺序：先 A，后 B/C（按 sorted plan）
+        self.assertEqual(
+            [
+                {"relative_path": "A/a.txt", "file_name": "a.txt", "md5": "md5-a"},
+                {"relative_path": "B/C/c.txt", "file_name": "c.txt", "md5": "md5-c"},
+            ],
+            result,
+        )
+        # 验证确实使用了 worker 线程（至少一个非主线程参与了 client.list）
+        self.assertTrue(
+            any(name.startswith("transfershare-local-scan") for name in thread_names),
+            f"未观察到本地扫描 worker 线程参与: {thread_names}",
+        )
+
+    def test_list_local_files_in_dirs_concurrent_propagates_worker_exception(self):
+        """并发模式下 worker 抛出的异常应被外层捕获并降级为空列表。"""
+        client = Mock()
+        client.list.side_effect = RuntimeError("boom")
+        service = StoragePathService(client)
+
+        with patch("storage_paths.LOCAL_SCAN_CONCURRENCY", 2), patch(
+            "storage_paths.handle_error_and_notify"
+        ):
+            result = service.list_local_files_in_dirs("/save", {"A", "B"})
+
+        self.assertEqual([], result)
 
 
 class WeChatNotifierTests(unittest.TestCase):
@@ -2089,6 +2168,85 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.assertIn("缺少分享链接", result["error"])
         progress_callback.assert_any_call("error", f"【1/2】失败: {result['error']}")
 
+    def test_transfer_multiple_shares_keeps_local_cache_across_share_links(self):
+        # 跨链接 cache 复用：批量入口不再清空 _local_files_cache，
+        # 让落到不同子目录的多链接可以复用对方扫过的本地索引。
+        self.storage._local_files_cache = {("/save", ("preserved",), True): ["pre"]}
+        self.storage._process_single_share_config = Mock(
+            return_value={
+                "index": 1,
+                "share_url": "u1",
+                "save_dir": "/save",
+                "success": True,
+                "partial": False,
+                "message": "成功",
+            }
+        )
+
+        with patch("storage.time.sleep"):
+            result = self.storage.transfer_multiple_shares([{"share_url": "u1"}])
+
+        self.assertTrue(result["success"])
+        # 入口未清缓存
+        self.assertIn(("/save", ("preserved",), True), self.storage._local_files_cache)
+
+    def test_transfer_multiple_shares_concurrent_preserves_index_order(self):
+        """并发模式下结果按原索引顺序合并，counters 与串行一致。"""
+        import threading
+
+        # 不同 worker 完成顺序不一致：让 index=1 的 worker 慢一点
+        slowest_event = threading.Event()
+
+        def side_effect(index, total_count, config, progress_callback):
+            if index == 1:
+                # 等待其他 worker 都进入再继续，模拟"快的先完成"
+                slowest_event.wait(0.5)
+            elif index == 3:
+                slowest_event.set()
+            return {
+                "index": index,
+                "share_url": config["share_url"],
+                "save_dir": f"/save/{index}",
+                "success": True,
+                "partial": False,
+                "message": f"成功-{index}",
+            }
+
+        self.storage._process_single_share_config = Mock(side_effect=side_effect)
+
+        configs = [
+            {"share_url": "u1"},
+            {"share_url": "u2"},
+            {"share_url": "u3"},
+        ]
+        with patch("storage.MULTI_SHARE_CONCURRENCY", 3), patch("storage.time.sleep"):
+            result = self.storage.transfer_multiple_shares(configs)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(3, result["success_count"])
+        # 即便 worker 完成顺序受调度影响，results 仍按 index=1,2,3 的顺序合并
+        self.assertEqual(
+            [1, 2, 3], [item["index"] for item in result["results"]]
+        )
+
+    def test_transfer_multiple_shares_concurrent_aggregates_failed_count_once(self):
+        """并发模式下 counters 不应重复累加（修复双重计数风险）。"""
+        self.storage._process_single_share_config = Mock(
+            side_effect=[
+                {"index": 1, "share_url": "u1", "success": True, "partial": False, "message": "ok"},
+                {"index": 2, "share_url": "u2", "success": False, "partial": False, "error": "fail"},
+            ]
+        )
+
+        with patch("storage.MULTI_SHARE_CONCURRENCY", 2), patch("storage.time.sleep"):
+            result = self.storage.transfer_multiple_shares(
+                [{"share_url": "u1"}, {"share_url": "u2"}]
+            )
+
+        self.assertEqual(1, result["success_count"])
+        self.assertEqual(1, result["failed_count"])
+        self.assertEqual(0, result["partial_count"])
+
     def test_transfer_multiple_shares_aggregates_counts_as_partial_when_has_failure(self):
         self.storage._process_single_share_config = Mock(
             side_effect=[
@@ -2328,6 +2486,26 @@ class BaiduStorageFlowTests(unittest.TestCase):
 
         self.assertEqual({"/other": ["other"]}, self.storage._local_files_cache)
 
+    def test_clear_local_files_cache_with_affected_dirs_preserves_siblings(self):
+        # 精确失效：传入受影响目录集合时，保留与之无关的兄弟子目录 cache
+        self.storage.path_service.normalize_path.side_effect = lambda path: path
+        self.storage.path_service._normalize_relative_dir = staticmethod(
+            lambda d: "" if str(d or "").strip("/") in ("", ".") else str(d).strip("/")
+        )
+        self.storage._local_files_cache = {
+            ("/save", ("a",), True): ["scan-a"],
+            ("/save", ("b",), True): ["scan-b"],
+            ("/save", ("c",), True): ["scan-c"],
+            "/other": ["other"],
+        }
+
+        self.storage._clear_local_files_cache("/save", {"a", "b"})
+
+        self.assertEqual(
+            {("/save", ("c",), True): ["scan-c"], "/other": ["other"]},
+            self.storage._local_files_cache,
+        )
+
     def test_execute_transfer_plan_clears_local_cache_once_after_successful_groups(self):
         transfer_list = [
             (1, "/save/a", "a/1.txt", "a/1.txt", False),
@@ -2343,7 +2521,11 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.assertEqual(2, success_count)
         self.assertEqual(transfer_list, successful_items)
         self.assertEqual([], failed_items)
-        self.storage._clear_local_files_cache.assert_called_once_with("/save")
+        # 改造后只清掉本批写入的相对子目录 cache，保留同 target 下兄弟目录 cache
+        self.storage._clear_local_files_cache.assert_called_once()
+        call_args, _ = self.storage._clear_local_files_cache.call_args
+        self.assertEqual("/save", call_args[0])
+        self.assertEqual({"a", "b"}, call_args[1])
 
     def test_execute_transfer_plan_does_not_sleep_between_successful_groups(self):
         self.storage.path_service.normalize_path.side_effect = lambda path: path
@@ -2900,6 +3082,367 @@ class BaiduClientAdapterTests(unittest.TestCase):
 
         self.assertEqual(2, len(calls))
         sleep.assert_called_once_with(1)
+
+
+class BaiduClientAdapterPoolSizingTests(unittest.TestCase):
+    """覆盖 _compute_pool_maxsize 决策矩阵与 session_pool_info 行为。"""
+
+    def _adapter(self, is_github_actions=False):
+        adapter = BaiduClientAdapter.__new__(BaiduClientAdapter)
+        adapter.is_github_actions = is_github_actions
+        adapter._session_pool_info = BaiduClientAdapter._new_session_pool_info()
+        return adapter
+
+    def test_compute_pool_maxsize_local_default(self):
+        adapter = self._adapter(is_github_actions=False)
+        with patch.dict(os.environ, {}, clear=True):
+            maxsize, connections, fanout = adapter._compute_pool_maxsize()
+        # 本地默认：max(32, 1*4) = 32，无 GA 偏置
+        self.assertEqual(32, maxsize)
+        self.assertEqual(32, connections)
+        self.assertEqual(4, fanout)
+
+    def test_compute_pool_maxsize_ga_default_adds_offset(self):
+        adapter = self._adapter(is_github_actions=True)
+        with patch.dict(os.environ, {}, clear=True):
+            maxsize, connections, fanout = adapter._compute_pool_maxsize()
+        # GA 默认：max(32, 1*4) + 8 = 40
+        self.assertEqual(40, maxsize)
+        self.assertEqual(40, connections)
+
+    def test_compute_pool_maxsize_explicit_value_ignores_ga_offset(self):
+        adapter = self._adapter(is_github_actions=True)
+        with patch.dict(
+            os.environ, {"TRANSFERSHARE_PCS_POOL_MAXSIZE": "64"}, clear=True
+        ):
+            maxsize, connections, _ = adapter._compute_pool_maxsize()
+        # 显式 64：直接用，不再 +8
+        self.assertEqual(64, maxsize)
+        self.assertEqual(64, connections)
+
+    def test_compute_pool_maxsize_zero_signals_disable(self):
+        adapter = self._adapter(is_github_actions=True)
+        with patch.dict(
+            os.environ, {"TRANSFERSHARE_PCS_POOL_MAXSIZE": "0"}, clear=True
+        ):
+            maxsize, connections, fanout = adapter._compute_pool_maxsize()
+        # 显式 0：表示禁用 patch
+        self.assertEqual(0, maxsize)
+        self.assertEqual(0, connections)
+        self.assertEqual(4, fanout)
+
+    def test_compute_pool_maxsize_invalid_fanout_falls_back(self):
+        adapter = self._adapter(is_github_actions=False)
+        with patch.dict(
+            os.environ, {"TRANSFERSHARE_PCS_POOL_FANOUT": "bad"}, clear=True
+        ):
+            with self.assertLogs("transfershare", level="WARNING") as ctx:
+                _, _, fanout = adapter._compute_pool_maxsize()
+        self.assertEqual(4, fanout)
+        self.assertTrue(
+            any("TRANSFERSHARE_PCS_POOL_FANOUT" in msg for msg in ctx.output)
+        )
+
+    def test_compute_pool_maxsize_scales_with_multi_concurrency(self):
+        adapter = self._adapter(is_github_actions=False)
+        with patch.dict(
+            os.environ,
+            {"TRANSFERSHARE_MULTI_SHARE_CONCURRENCY": "16"},
+            clear=True,
+        ):
+            maxsize, _, _ = adapter._compute_pool_maxsize()
+        # 16 * 4 = 64 > 32，取 64
+        self.assertEqual(64, maxsize)
+
+    def test_session_pool_info_is_a_copy(self):
+        adapter = self._adapter()
+        info = adapter.session_pool_info
+        info["pool_maxsize"] = 9999
+        # 修改返回字典不影响内部状态
+        self.assertEqual(0, adapter._session_pool_info["pool_maxsize"])
+        self.assertEqual(0, adapter.session_pool_info["pool_maxsize"])
+
+    def test_session_pool_info_falls_back_when_init_skipped(self):
+        # 测试场景：BaiduClientAdapter.__new__ 跳过 __init__，
+        # 没设置 _session_pool_info 字段
+        adapter = BaiduClientAdapter.__new__(BaiduClientAdapter)
+        info = adapter.session_pool_info
+        self.assertEqual(
+            {
+                "pool_maxsize": 0,
+                "pool_connections": 0,
+                "fanout": 0,
+                "patched": False,
+            },
+            info,
+        )
+
+
+class BaiduClientAdapterSessionPatchTests(unittest.TestCase):
+    """覆盖 _patch_session_pool / _apply_session_patches / _init_client 集成路径。"""
+
+    def _adapter(self, is_github_actions=False):
+        adapter = BaiduClientAdapter.__new__(BaiduClientAdapter)
+        adapter.is_github_actions = is_github_actions
+        adapter._session_pool_info = BaiduClientAdapter._new_session_pool_info()
+        adapter._session_patches_applied = False
+        adapter._session_cookie_lock = None
+        return adapter
+
+    @staticmethod
+    def _make_pcs_candidate(session=None):
+        import requests
+
+        if session is None:
+            session = requests.Session()
+        return SimpleNamespace(_session=session)
+
+    def test_patch_session_pool_replaces_https_and_http_adapters(self):
+        adapter = self._adapter(is_github_actions=False)
+        pcs_candidate = self._make_pcs_candidate()
+        original_https = pcs_candidate._session.adapters["https://"]
+        original_http = pcs_candidate._session.adapters["http://"]
+
+        with patch.dict(os.environ, {}, clear=True):
+            ok = adapter._patch_session_pool(pcs_candidate)
+
+        self.assertTrue(ok)
+        new_https = pcs_candidate._session.adapters["https://"]
+        new_http = pcs_candidate._session.adapters["http://"]
+        # 必须是新实例（adapters 被替换）
+        self.assertIsNot(original_https, new_https)
+        self.assertIsNot(original_http, new_http)
+        # 池容量等于 _compute_pool_maxsize 决策值（本地默认 32）
+        self.assertEqual(
+            32, new_https.poolmanager.connection_pool_kw.get("maxsize")
+        )
+        self.assertEqual(
+            32, new_http.poolmanager.connection_pool_kw.get("maxsize")
+        )
+        self.assertTrue(adapter.session_pool_info["patched"])
+        self.assertEqual(32, adapter.session_pool_info["pool_maxsize"])
+
+    def test_patch_session_pool_skips_when_session_is_not_requests_session(self):
+        adapter = self._adapter()
+        pcs_candidate = SimpleNamespace(_session=object())
+
+        with self.assertLogs("transfershare", level="WARNING") as ctx:
+            ok = adapter._patch_session_pool(pcs_candidate)
+
+        self.assertFalse(ok)
+        self.assertFalse(adapter.session_pool_info["patched"])
+        self.assertTrue(
+            any("不是 requests.Session 实例" in msg for msg in ctx.output)
+        )
+
+    def test_patch_session_pool_disabled_by_explicit_zero(self):
+        adapter = self._adapter()
+        pcs_candidate = self._make_pcs_candidate()
+        original_adapters = dict(pcs_candidate._session.adapters)
+
+        with patch.dict(
+            os.environ, {"TRANSFERSHARE_PCS_POOL_MAXSIZE": "0"}, clear=True
+        ):
+            ok = adapter._patch_session_pool(pcs_candidate)
+
+        self.assertFalse(ok)
+        # adapters 完全没动
+        self.assertEqual(original_adapters, dict(pcs_candidate._session.adapters))
+        self.assertFalse(adapter.session_pool_info["patched"])
+
+    def test_patch_session_pool_rolls_back_on_mount_failure(self):
+        adapter = self._adapter(is_github_actions=False)
+        pcs_candidate = self._make_pcs_candidate()
+        snapshot = dict(pcs_candidate._session.adapters)
+
+        # 第一次 mount https:// 成功，第二次 mount http:// 抛异常
+        original_mount = pcs_candidate._session.mount
+        call_counter = {"count": 0}
+
+        def faulty_mount(prefix, ad):
+            call_counter["count"] += 1
+            if call_counter["count"] == 2:
+                raise RuntimeError("boom")
+            return original_mount(prefix, ad)
+
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            pcs_candidate._session, "mount", side_effect=faulty_mount
+        ), self.assertLogs("transfershare", level="WARNING") as ctx:
+            ok = adapter._patch_session_pool(pcs_candidate)
+
+        self.assertFalse(ok)
+        # adapters 必须完全回滚到 snapshot
+        self.assertEqual(set(snapshot.keys()), set(pcs_candidate._session.adapters.keys()))
+        for key, value in snapshot.items():
+            self.assertIs(value, pcs_candidate._session.adapters[key])
+        self.assertFalse(adapter.session_pool_info["patched"])
+        self.assertTrue(
+            any("会话连接池替换失败" in msg for msg in ctx.output)
+        )
+
+    def test_apply_session_patches_skips_when_already_patched(self):
+        adapter = self._adapter()
+        pcs_candidate = self._make_pcs_candidate()
+        pcs_candidate._session_concurrency_patched = True
+
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            adapter, "_patch_session_pool"
+        ) as mock_pool, self.assertLogs("transfershare", level="DEBUG") as ctx:
+            adapter._apply_session_patches(pcs_candidate)
+
+        mock_pool.assert_not_called()
+        self.assertTrue(any("已存在" in msg for msg in ctx.output))
+
+    def test_apply_session_patches_is_idempotent(self):
+        adapter = self._adapter()
+        pcs_candidate = self._make_pcs_candidate()
+
+        with patch.dict(os.environ, {}, clear=True):
+            adapter._apply_session_patches(pcs_candidate)
+            # 第二次：因 _session_concurrency_patched=True 应跳过
+            with patch.object(
+                pcs_candidate._session, "mount"
+            ) as mock_mount:
+                adapter._apply_session_patches(pcs_candidate)
+        # 第二次完全没调 mount
+        mock_mount.assert_not_called()
+        self.assertTrue(getattr(pcs_candidate, "_session_concurrency_patched", False))
+
+    def test_apply_session_patches_logs_info_with_status(self):
+        adapter = self._adapter(is_github_actions=True)
+        pcs_candidate = self._make_pcs_candidate()
+
+        with patch.dict(os.environ, {}, clear=True), self.assertLogs(
+            "transfershare", level="INFO"
+        ) as ctx:
+            adapter._apply_session_patches(pcs_candidate)
+
+        info_lines = [msg for msg in ctx.output if "会话并发 patch 已启用" in msg]
+        self.assertEqual(1, len(info_lines))
+        info_line = info_lines[0]
+        self.assertIn("pool_maxsize=40", info_line)  # GA 默认 32+8
+        self.assertIn("ga_environment=true", info_line)
+        self.assertIn("patched_cookies_update=false", info_line)  # Phase 3 才打开
+
+    def test_init_client_keeps_working_when_session_pool_patch_fails(self):
+        """集成：_pcs_factory 注入 fake；mount 抛异常时 _init_client 仍然成功。"""
+        import requests
+
+        class FakeSession(requests.Session):
+            pass
+
+        class FakePcs:
+            def __init__(self):
+                self._session = FakeSession()
+                # 让 mount 抛异常以触发回滚
+                self._session.mount = Mock(side_effect=RuntimeError("mount-boom"))
+
+        class FakeApi:
+            def __init__(self, cookies):
+                self._pcs = FakePcs()
+
+            def quota(self):
+                return (1024, 512)
+
+        with patch.object(
+            BaiduClientAdapter, "_pcs_factory", staticmethod(FakeApi)
+        ), patch.dict(os.environ, {}, clear=True):
+            adapter = BaiduClientAdapter("BDUSS=foo; STOKEN=bar")
+
+        # _init_client 不抛异常
+        self.assertIsNotNone(adapter.client)
+        self.assertEqual((1024, 512), adapter._quota_info)
+        # patch 失败被回滚，patched=False
+        self.assertFalse(adapter.session_pool_info["patched"])
+
+    def test_patch_cookies_update_skipped_when_method_missing(self):
+        adapter = self._adapter()
+        pcs_candidate = SimpleNamespace()  # 无 _cookies_update
+
+        with self.assertLogs("transfershare", level="DEBUG") as ctx:
+            ok = adapter._patch_cookies_update(pcs_candidate)
+
+        self.assertFalse(ok)
+        self.assertIsNone(adapter._session_cookie_lock)
+        self.assertTrue(any("未暴露 _cookies_update" in msg for msg in ctx.output))
+
+    def test_patch_cookies_update_wraps_original_method(self):
+        adapter = self._adapter()
+        calls = []
+
+        def original(cookies, *args, **kwargs):
+            calls.append(dict(cookies))
+
+        pcs_candidate = SimpleNamespace(_cookies_update=original)
+
+        ok = adapter._patch_cookies_update(pcs_candidate)
+        self.assertTrue(ok)
+        self.assertIsNotNone(adapter._session_cookie_lock)
+
+        # 调用 patched 后原方法应当被调用
+        pcs_candidate._cookies_update({"K": "V"})
+        self.assertEqual([{"K": "V"}], calls)
+
+    def test_patch_cookies_update_serializes_concurrent_updates(self):
+        """并发场景下 patched _cookies_update 必须串行进入原方法。"""
+        import time
+
+        adapter = self._adapter()
+        # 用 set + lock 记录"任意时刻最多一个线程在 critical section"的不变量
+        in_critical = set()
+        violations = []
+        record_lock = threading.Lock()
+
+        def original(cookies, *args, **kwargs):
+            tid = threading.get_ident()
+            with record_lock:
+                if in_critical:
+                    violations.append(("overlap", in_critical.copy(), tid))
+                in_critical.add(tid)
+            time.sleep(0.005)  # 模拟非原子写
+            with record_lock:
+                in_critical.discard(tid)
+
+        pcs_candidate = SimpleNamespace(_cookies_update=original)
+        self.assertTrue(adapter._patch_cookies_update(pcs_candidate))
+
+        n = 8
+        barrier = threading.Barrier(n)
+        threads = []
+        errors = []
+
+        def worker(i):
+            try:
+                barrier.wait(timeout=2)
+                pcs_candidate._cookies_update({f"K{i}_a": "x", f"K{i}_b": "y"})
+            except Exception as exc:
+                errors.append(exc)
+
+        for i in range(n):
+            t = threading.Thread(target=worker, args=(i,))
+            threads.append(t)
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        self.assertEqual([], errors)
+        self.assertEqual([], violations, f"observed concurrent entries: {violations}")
+
+    def test_apply_session_patches_logs_cookie_status(self):
+        adapter = self._adapter(is_github_actions=False)
+        pcs_candidate = self._make_pcs_candidate()
+        # 给 pcs_candidate 一个简单的 _cookies_update
+        pcs_candidate._cookies_update = lambda c, *a, **kw: None
+
+        with patch.dict(os.environ, {}, clear=True), self.assertLogs(
+            "transfershare", level="INFO"
+        ) as ctx:
+            adapter._apply_session_patches(pcs_candidate)
+
+        info_lines = [msg for msg in ctx.output if "patched_cookies_update=true" in msg]
+        self.assertEqual(1, len(info_lines))
+        # 同时 cookie lock 已建立
+        self.assertIsNotNone(adapter._session_cookie_lock)
 
 
 if __name__ == "__main__":

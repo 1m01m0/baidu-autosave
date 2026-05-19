@@ -3,8 +3,10 @@
 
 import os
 import posixpath
+import threading
 import time
 
+from env_utils import read_positive_int_env
 from storage_errors import (
     classify_storage_error,
     is_already_exists_error,
@@ -15,6 +17,13 @@ from utils import handle_error_and_notify
 
 DIR_OPERATION_MAX_ATTEMPTS = 3
 DIR_OPERATION_RETRY_DELAY = 1
+# list_local_files_in_dirs 的顶层并发度：当 scan_plan 包含多个独立子目录时，
+# 用 ThreadPoolExecutor 同时扫多个子目录。默认 1（串行，与历史行为一致）。
+# 注意：百度对 list 接口有限频，调高后命中限频会自动通过 call_with_retry 退避，
+# 但实际加速比依赖于扫描目录数 / 限频阈值的关系，建议从 2~4 起步实测。
+LOCAL_SCAN_CONCURRENCY = read_positive_int_env(
+    "TRANSFERSHARE_LOCAL_SCAN_CONCURRENCY", 1
+)
 
 
 class StoragePathService:
@@ -23,6 +32,9 @@ class StoragePathService:
         self.wechat_notifier = wechat_notifier
         self._local_files_cache = local_files_cache if local_files_cache is not None else {}
         self._ensured_dirs = set()
+        # 由 BaiduStorage 在创建时注入；多链接并发下用来保护 _local_files_cache 的
+        # 读写一致性。默认是一个本地 RLock，单实例使用时也安全。
+        self.shared_state_lock = threading.RLock()
 
     @staticmethod
     def normalize_path(path, file_only=False):
@@ -117,6 +129,11 @@ class StoragePathService:
 
             path = self.normalize_path(path)
             if path in ("", "/"):
+                return True
+
+            # 完整路径已确认存在时直接返回，跳过逐级前缀检查；
+            # 批量目录场景（多个分享落到同一深路径）下减少了字符串处理与 set 查找。
+            if path in self._ensured_dirs:
                 return True
 
             parts = [p for p in path.strip("/").split("/") if p]
@@ -242,8 +259,10 @@ class StoragePathService:
             tuple(sorted(normalized_relative_dirs)),
             bool(merge_dirs),
         )
-        if use_cache and cache_key in self._local_files_cache:
-            return [dict(item) for item in self._local_files_cache[cache_key]]
+        if use_cache:
+            with self.shared_state_lock:
+                if cache_key in self._local_files_cache:
+                    return [dict(item) for item in self._local_files_cache[cache_key]]
 
         try:
             if not self.client:
@@ -256,7 +275,6 @@ class StoragePathService:
                 )
                 return []
 
-            files = []
             base = normalized_dir_path.replace("\\", "/")
             if not base.endswith("/"):
                 base += "/"
@@ -264,52 +282,18 @@ class StoragePathService:
                 normalized_relative_dirs, merge_dirs=merge_dirs
             )
 
-            def _append_file(item):
-                item_path = getattr(item, "path", "").replace("\\", "/")
-                if merge_dirs and not item_path.startswith(base):
-                    return
-                relative_path = self._relative_item_path(item_path, base)
-                if merge_dirs:
-                    parent_dir = self._normalize_relative_dir(posixpath.dirname(relative_path))
-                    if parent_dir not in normalized_relative_dirs:
-                        return
-                files.append(
-                    {
-                        "relative_path": relative_path,
-                        "file_name": os.path.basename(item_path),
-                        "md5": getattr(item, "md5", None),
-                    }
-                )
-
-            def _should_descend(relative_path):
-                relative_path = self._normalize_relative_dir(relative_path)
-                return any(
-                    candidate == relative_path or candidate.startswith(f"{relative_path}/")
-                    for candidate in normalized_relative_dirs
-                    if candidate
-                )
-
-            def _list_dir(scan_path, recursive=False):
-                def should_descend(item):
-                    if not recursive:
-                        return False
-                    item_path = getattr(item, "path", "").replace("\\", "/")
-                    return _should_descend(self._relative_item_path(item_path, base))
-
-                for item in self._iter_local_tree_items(
-                    scan_path, missing_ok=True, should_descend=should_descend
-                ):
-                    if item.is_file:
-                        _append_file(item)
-
-            for relative_dir, recursive in sorted(scan_plan.items()):
-                scan_path = normalized_dir_path.rstrip("/") or "/"
-                if relative_dir:
-                    scan_path = f"{scan_path.rstrip('/')}/{relative_dir}"
-                _list_dir(scan_path, recursive=recursive)
+            sorted_plan = sorted(scan_plan.items())
+            files = self._collect_local_scan_results(
+                normalized_dir_path,
+                base,
+                normalized_relative_dirs,
+                merge_dirs,
+                sorted_plan,
+            )
 
             if use_cache:
-                self._local_files_cache[cache_key] = [dict(item) for item in files]
+                with self.shared_state_lock:
+                    self._local_files_cache[cache_key] = [dict(item) for item in files]
             return files
         except Exception as exc:
             handle_error_and_notify(
@@ -321,10 +305,129 @@ class StoragePathService:
             )
             return []
 
+    def _scan_single_relative_dir(
+        self,
+        normalized_dir_path,
+        base,
+        normalized_relative_dirs,
+        merge_dirs,
+        relative_dir,
+        recursive,
+    ):
+        """扫描 scan_plan 中单个 (relative_dir, recursive) 项，返回该项的文件列表。
+
+        作为 ``list_local_files_in_dirs`` 的并发单元抽出来；不依赖外层 closure，
+        因此可以安全地在 ThreadPoolExecutor 中并行调用。
+        """
+
+        def _should_descend(relative_path):
+            relative_path = self._normalize_relative_dir(relative_path)
+            return any(
+                candidate == relative_path or candidate.startswith(f"{relative_path}/")
+                for candidate in normalized_relative_dirs
+                if candidate
+            )
+
+        scan_path = normalized_dir_path.rstrip("/") or "/"
+        if relative_dir:
+            scan_path = f"{scan_path.rstrip('/')}/{relative_dir}"
+
+        def should_descend(item):
+            if not recursive:
+                return False
+            item_path = getattr(item, "path", "").replace("\\", "/")
+            return _should_descend(self._relative_item_path(item_path, base))
+
+        local_files = []
+        for item in self._iter_local_tree_items(
+            scan_path, missing_ok=True, should_descend=should_descend
+        ):
+            if not item.is_file:
+                continue
+            item_path = getattr(item, "path", "").replace("\\", "/")
+            if merge_dirs and not item_path.startswith(base):
+                continue
+            relative_path = self._relative_item_path(item_path, base)
+            if merge_dirs:
+                parent_dir = self._normalize_relative_dir(posixpath.dirname(relative_path))
+                if parent_dir not in normalized_relative_dirs:
+                    continue
+            local_files.append(
+                {
+                    "relative_path": relative_path,
+                    "file_name": os.path.basename(item_path),
+                    "md5": getattr(item, "md5", None),
+                }
+            )
+        return local_files
+
+    def _collect_local_scan_results(
+        self,
+        normalized_dir_path,
+        base,
+        normalized_relative_dirs,
+        merge_dirs,
+        sorted_plan,
+    ):
+        """串行或并发地执行 sorted_plan，按 plan 顺序合并结果。"""
+        if not sorted_plan:
+            return []
+
+        concurrency = max(1, min(LOCAL_SCAN_CONCURRENCY, len(sorted_plan)))
+        if concurrency == 1:
+            files = []
+            for relative_dir, recursive in sorted_plan:
+                files.extend(
+                    self._scan_single_relative_dir(
+                        normalized_dir_path,
+                        base,
+                        normalized_relative_dirs,
+                        merge_dirs,
+                        relative_dir,
+                        recursive,
+                    )
+                )
+            return files
+
+        # 并发路径：每个 plan 项产生一个 future，结果按 plan 顺序合并以保证
+        # files 的相对顺序与串行实现一致。_iter_listed_dir 已在内部走 call_with_retry
+        # 处理限频；并发只是把多个独立子目录的网络等待重叠起来。
+        from concurrent.futures import ThreadPoolExecutor
+
+        results = [None] * len(sorted_plan)
+        with ThreadPoolExecutor(
+            max_workers=concurrency, thread_name_prefix="transfershare-local-scan"
+        ) as executor:
+            future_index = {}
+            for index, (relative_dir, recursive) in enumerate(sorted_plan):
+                future = executor.submit(
+                    self._scan_single_relative_dir,
+                    normalized_dir_path,
+                    base,
+                    normalized_relative_dirs,
+                    merge_dirs,
+                    relative_dir,
+                    recursive,
+                )
+                future_index[future] = index
+            for future in future_index:
+                index = future_index[future]
+                # future.result() 会把 worker 内的异常 re-raise；
+                # 让外层 try/except 统一处理（与串行路径一致）
+                results[index] = future.result()
+
+        files = []
+        for chunk in results:
+            if chunk:
+                files.extend(chunk)
+        return files
+
     def list_local_files(self, dir_path, use_cache=False):
         normalized_dir_path = self.normalize_path(dir_path)
-        if use_cache and normalized_dir_path in self._local_files_cache:
-            return [dict(item) for item in self._local_files_cache[normalized_dir_path]]
+        if use_cache:
+            with self.shared_state_lock:
+                if normalized_dir_path in self._local_files_cache:
+                    return [dict(item) for item in self._local_files_cache[normalized_dir_path]]
 
         try:
             if not self.client:
@@ -357,7 +460,8 @@ class StoragePathService:
                     )
 
             if use_cache:
-                self._local_files_cache[normalized_dir_path] = [dict(item) for item in files]
+                with self.shared_state_lock:
+                    self._local_files_cache[normalized_dir_path] = [dict(item) for item in files]
             return files
         except Exception as exc:
             handle_error_and_notify(

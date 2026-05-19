@@ -1,361 +1,421 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""企业微信机器人通知器。
 
-from zoneinfo import ZoneInfo
-from typing import Optional, Dict, Any, List
-import requests
-from datetime import datetime
-import time
-import traceback
+设计要点：
+
+- 仅依赖 ``utils`` 提供的脱敏函数；自身不再回调 ``handle_error_and_notify``，
+  彻底打破与 ``utils`` 的循环依赖。
+- 失败重试只覆盖网络层异常和 5xx；对 4xx / 业务错误（``errcode != 0``）不再无差别重试。
+- 通过 ``GitHubActionsContext`` 可注入运行时信息，避免方法直接读环境变量，便于测试。
+- markdown 报告统一通过 ``_render_report`` 拼装，移除原来四个分支的复制粘贴。
+"""
+
+from __future__ import annotations
+
+import logging
 import os
+import time
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+from zoneinfo import ZoneInfo
 
-# 常量定义
-MAX_RETRIES = 2
-RETRY_DELAY = 5  # 重试间隔（秒）
-REQUEST_TIMEOUT = 60  # 请求超时（秒）
-MAX_FILES_TO_SHOW = 5  # 消息中显示的最大文件数量
-TIMEZONE = ZoneInfo("Asia/Shanghai")  # 时区
-DEFAULT_SAVE_DIR = "默认"  # 默认保存目录
+import requests
+
+from utils import collect_transferred_files, mask_sensitive
+
+# ============================================================================
+# 1. 配置常量
+# ============================================================================
+
+# HTTP 行为
+DEFAULT_MAX_RETRIES = 2
+DEFAULT_RETRY_DELAY = 5  # seconds
+DEFAULT_CONNECT_TIMEOUT = 10  # seconds
+DEFAULT_READ_TIMEOUT = 30  # seconds
+
+# 文案
+MAX_FILES_TO_SHOW = 5
+DEFAULT_TIMEZONE = ZoneInfo("Asia/Shanghai")
+DEFAULT_SAVE_DIR = "默认"
+
+# 仅这些 HTTP 状态视为可重试网络故障
+_RETRYABLE_HTTP_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+
+
+_logger = logging.getLogger("transfershare.wechat")
+
+
+# ============================================================================
+# 2. GitHub Actions 元数据（可注入，便于测试）
+# ============================================================================
+
+
+@dataclass(frozen=True)
+class GitHubActionsContext:
+    """GitHub Actions 运行时元数据。"""
+
+    repository: str = ""
+    run_id: str = ""
+    run_number: str = ""
+    workflow: str = ""
+    ref: str = ""
+    sha: str = ""
+    server_url: str = "https://github.com"
+
+    @property
+    def short_sha(self) -> str:
+        return self.sha[:7] if self.sha else ""
+
+    @property
+    def run_url(self) -> Optional[str]:
+        if self.repository and self.run_id:
+            return f"{self.server_url}/{self.repository}/actions/runs/{self.run_id}"
+        return None
+
+    @property
+    def commit_url(self) -> Optional[str]:
+        if self.repository and self.sha:
+            return f"{self.server_url}/{self.repository}/commit/{self.sha}"
+        return None
+
+    @property
+    def ref_label(self) -> str:
+        return (
+            self.ref.replace("refs/heads/", "")
+            .replace("refs/tags/", "")
+            .replace("refs/pull/", "PR-")
+        )
+
+
+def _read_github_actions_context_from_env(
+    env: Optional[Mapping[str, str]] = None,
+) -> Optional[GitHubActionsContext]:
+    """仅当 ``GITHUB_ACTIONS=true`` 时返回上下文，否则 None。"""
+    values = env if env is not None else os.environ
+    if values.get("GITHUB_ACTIONS") != "true":
+        return None
+    return GitHubActionsContext(
+        repository=values.get("GITHUB_REPOSITORY", ""),
+        run_id=values.get("GITHUB_RUN_ID", ""),
+        run_number=values.get("GITHUB_RUN_NUMBER", ""),
+        workflow=values.get("GITHUB_WORKFLOW", ""),
+        ref=values.get("GITHUB_REF", ""),
+        sha=values.get("GITHUB_SHA", ""),
+        server_url=values.get("GITHUB_SERVER_URL", "https://github.com"),
+    )
+
+
+# ============================================================================
+# 3. 通知器
+# ============================================================================
+
+
+_FieldList = List[Tuple[str, str]]
 
 
 class WeChatNotifier:
-    def __init__(self, webhook_url: str):
-        """
-        初始化企业微信通知器
-        Args:
-            webhook_url: 企业微信机器人的webhook地址
-        """
+    """企业微信机器人通知器。"""
+
+    def __init__(
+        self,
+        webhook_url: str,
+        *,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        retry_delay: float = DEFAULT_RETRY_DELAY,
+        connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
+        read_timeout: float = DEFAULT_READ_TIMEOUT,
+        timezone: ZoneInfo = DEFAULT_TIMEZONE,
+        github_context_provider: Optional[
+            Callable[[], Optional[GitHubActionsContext]]
+        ] = None,
+    ) -> None:
         self.webhook_url = webhook_url
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
+        self.timeout: Tuple[float, float] = (connect_timeout, read_timeout)
+        self.timezone = timezone
+        self._github_context_provider = (
+            github_context_provider or _read_github_actions_context_from_env
+        )
 
-    def _build_message_data(self, message: str, msg_type: str) -> Dict[str, Any]:
-        """
-        构建消息数据
-        Args:
-            message: 消息内容
-            msg_type: 消息类型
-        Returns:
-            消息数据字典
-        """
-        if msg_type == "text":
-            return {"msgtype": "text", "text": {"content": message}}
-        elif msg_type == "markdown":
-            return {"msgtype": "markdown", "markdown": {"content": message}}
-        else:
-            raise ValueError(f"不支持的消息类型: {msg_type}")
-
-    def _handle_send_error(self, error: Exception, attempt: int) -> None:
-        """
-        处理发送错误
-        Args:
-            error: 异常对象
-            attempt: 当前尝试次数
-        """
-        from utils import mask_sensitive
-
-        error_text = mask_sensitive(str(error)) or type(error).__name__
-        stack_text = mask_sensitive(traceback.format_exc()) or ""
-        print(f"发送企业微信通知时出错: {type(error).__name__}: {error_text}")
-        if stack_text:
-            print("错误堆栈信息:")
-            print(stack_text)
-
-        # 使用现有的错误处理工具（在函数内部导入以避免循环导入）
-        try:
-            from utils import handle_error_and_notify
-
-            handle_error_and_notify(
-                error,
-                f"发送企业微信通知时出错 (尝试 {attempt + 1}/{MAX_RETRIES + 1})",
-                None,
-            )
-        except ImportError:
-            # 如果无法导入工具函数，至少打印错误信息
-            pass
+    # ---- 对外接口 -----------------------------------------------------------
 
     def send_message(self, message: str, msg_type: str = "text") -> bool:
-        """
-        发送消息到企业微信，失败时重试
-        Args:
-            message: 消息内容
-            msg_type: 消息类型，支持 "text", "markdown"
-        Returns:
-            是否发送成功
-        """
-        for attempt in range(MAX_RETRIES + 1):
+        """发送一条消息，必要时重试。"""
+        masked = self._mask_sensitive(message) or message
+        payload = self._build_message_data(masked, msg_type)
+
+        last_error: Optional[str] = None
+        for attempt in range(self.max_retries + 1):
             try:
-                masked_message = self._mask_sensitive(message) or message
-                data = self._build_message_data(masked_message, msg_type)
                 response = requests.post(
                     self.webhook_url,
-                    json=data,
+                    json=payload,
                     headers={"Content-Type": "application/json"},
-                    timeout=REQUEST_TIMEOUT,
+                    timeout=self.timeout,
                 )
-
-                if response.status_code == 200:
-                    result = response.json()
-                    if result.get("errcode") == 0:
-                        print("企业微信通知发送成功")
-                        return True
-                    else:
-                        error_msg = result.get("errmsg", "未知错误")
-                        print(f"企业微信通知发送失败: {error_msg}")
-                else:
-                    print(f"企业微信通知发送失败: HTTP {response.status_code}")
-
-                # 判断是否需要重试
-                if attempt < MAX_RETRIES:
-                    print(f"第 {attempt + 1} 次重试...")
-                    time.sleep(RETRY_DELAY)
+            except requests.RequestException as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+                _logger.warning(
+                    "企业微信通知请求异常 (%s/%s): %s",
+                    attempt + 1,
+                    self.max_retries + 1,
+                    self._mask_sensitive(last_error),
+                )
+                if attempt < self.max_retries:
+                    time.sleep(self.retry_delay)
                     continue
-                else:
-                    return False
+                return False
 
-            except Exception as e:
-                self._handle_send_error(e, attempt)
-                if attempt < MAX_RETRIES:
-                    print(f"第 {attempt + 1} 次重试...")
-                    time.sleep(RETRY_DELAY)
-                    continue
-                else:
-                    return False
+            ok, retryable, message = self._classify_response(response)
+            if ok:
+                _logger.info("企业微信通知发送成功")
+                return True
 
+            last_error = message
+            _logger.warning(
+                "企业微信通知发送失败 (%s/%s): %s",
+                attempt + 1,
+                self.max_retries + 1,
+                self._mask_sensitive(message),
+            )
+            if not retryable or attempt >= self.max_retries:
+                return False
+            time.sleep(self.retry_delay)
+
+        _logger.error("企业微信通知最终失败: %s", self._mask_sensitive(last_error or ""))
         return False
-
-    def _get_current_time(self) -> str:
-        """获取当前时间字符串"""
-        return datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
-
-    def _get_save_dir(self, config: Optional[Dict[str, Any]]) -> str:
-        """安全获取保存目录"""
-        return config.get("save_dir", DEFAULT_SAVE_DIR) if config else DEFAULT_SAVE_DIR
-
-    def _get_github_actions_info(self) -> Optional[Dict[str, str]]:
-        """
-        获取 GitHub Actions 运行详情
-        
-        Returns:
-            dict: GitHub Actions 信息，如果不是 GitHub Actions 环境则返回 None
-        """
-        if os.getenv("GITHUB_ACTIONS") != "true":
-            return None
-        
-        try:
-            repository = os.getenv("GITHUB_REPOSITORY", "")
-            run_id = os.getenv("GITHUB_RUN_ID", "")
-            run_number = os.getenv("GITHUB_RUN_NUMBER", "")
-            workflow = os.getenv("GITHUB_WORKFLOW", "")
-            server_url = os.getenv("GITHUB_SERVER_URL", "https://github.com")
-            ref = os.getenv("GITHUB_REF", "")
-            sha = os.getenv("GITHUB_SHA", "")
-            
-            # 构建运行详情链接
-            run_url = f"{server_url}/{repository}/actions/runs/{run_id}" if repository and run_id else None
-            
-            # 构建提交链接
-            commit_url = f"{server_url}/{repository}/commit/{sha}" if repository and sha else None
-            
-            return {
-                "repository": repository,
-                "run_id": run_id,
-                "run_number": run_number,
-                "workflow": workflow,
-                "ref": ref,
-                "sha": sha[:7] if sha else "",  # 只显示前7位
-                "run_url": run_url,
-                "commit_url": commit_url,
-            }
-        except Exception:
-            return None
-
-    @staticmethod
-    def _format_limited_items(title: str, items: List[Any], formatter) -> str:
-        if not items:
-            return ""
-
-        shown_items = items[:MAX_FILES_TO_SHOW]
-        info = f"\n**{title}**:\n" + "\n".join(
-            [f"• {formatter(item)}" for item in shown_items]
-        )
-        if len(items) > MAX_FILES_TO_SHOW:
-            info += f"\n• ... 还有 {len(items) - MAX_FILES_TO_SHOW} 个文件"
-        return info
-
-    def _format_files_info(self, transferred_files: List[str]) -> str:
-        return self._format_limited_items("转存文件", transferred_files, lambda item: item)
-
-    def _collect_transferred_files(self, result: Dict[str, Any]) -> List[str]:
-        """
-        从批量结果中收集所有成功转存的文件
-        Args:
-            result: 转存结果字典
-        Returns:
-            所有转存的文件列表
-        """
-        from utils import collect_transferred_files
-
-        return collect_transferred_files(result)
 
     def send_transfer_result(
         self, result: Dict[str, Any], config: Optional[Dict[str, Any]]
     ) -> bool:
-        """
-        发送转存结果通知
-        Args:
-            result: 转存结果字典
-            config: 配置信息
-        Returns:
-            是否发送成功
-        """
-        current_time = self._get_current_time()
+        """根据转存结果发送通知。"""
         save_dir = self._get_save_dir(config)
-
-        # 计算总链接数和任务描述
         total_count = result.get("total_count", 1)
         task_desc = (
             f"批量转存任务 ({total_count}个链接)" if total_count > 1 else "转存任务"
         )
 
         if result.get("success"):
-            if result.get("skipped"):
-                # 没有新文件需要转存
-                result_msg = result.get("message") or result.get(
-                    "summary", "没有新文件需要转存"
-                )
-                message = f"""## 📋 百度网盘转存报告
-**时间**: {current_time}
-**状态**: ✅ 完成（无新文件）
-**任务**: {task_desc}
-**保存目录**: {save_dir}
-**结果**: {result_msg}"""
-            else:
-                # 转存成功
-                transferred_files = self._collect_transferred_files(result)
-                result_msg = result.get("message") or result.get("summary", "转存成功")
-                files_info = self._format_files_info(transferred_files)
-
-                message = f"""## 🎉 百度网盘转存报告
-**时间**: {current_time}
-**状态**: ✅ 转存成功
-**任务**: {task_desc}
-**保存目录**: {save_dir}
-**结果**: {result_msg}{files_info}"""
-        elif result.get("partial"):
-            error_msg = result.get("error", "部分转存成功")
-            transfer_failed_files = result.get("transfer_failed_files", [])
-            transfer_failed_info = self._format_limited_items(
-                "转存失败",
-                transfer_failed_files,
-                lambda item: f"{item.get('final_path') or item.get('clean_path')}: {item.get('error')}",
-            )
-            rename_failed_files = result.get("rename_failed_files", [])
-            rename_failed_info = self._format_limited_items(
-                "重命名失败",
-                rename_failed_files,
-                lambda item: f"{item.get('source_path')} -> {item.get('target_path')}: {item.get('error')}",
-            )
-            message = f"""## ⚠️ 百度网盘转存报告
-**时间**: {current_time}
-**状态**: ⚠️ 部分成功（按失败处理，退出码 1）
-**任务**: {task_desc}
-**保存目录**: {save_dir}
-**结果**: {error_msg}{transfer_failed_info}{rename_failed_info}"""
-        else:
-            # 转存失败
-            error_msg = result.get("error", "未知错误")
-            message = f"""## ❌ 百度网盘转存报告
-**时间**: {current_time}
-**状态**: ❌ 转存失败
-**任务**: {task_desc}
-**保存目录**: {save_dir}
-**错误信息**: {error_msg}
-
-请检查分享链接是否有效，或查看详细日志排查问题。"""
-
-        return self.send_message(message, "markdown")
-
-    def _mask_sensitive(self, text: Optional[str]) -> Optional[str]:
-        """
-        掩码敏感信息
-        Args:
-            text: 原始文本
-        Returns:
-            掩码后的文本
-        """
-        if text is None:
-            return text
-
-        from utils import mask_sensitive as shared_mask_sensitive
-
-        masked = shared_mask_sensitive(text)
-        return masked if masked is not None else text
+            return self._send_success_or_skipped_report(result, task_desc, save_dir)
+        if result.get("partial"):
+            return self._send_partial_report(result, task_desc, save_dir)
+        return self._send_failure_report(result, task_desc, save_dir)
 
     def send_error_notification(
         self, error_msg: str, config: Optional[Dict[str, Any]]
     ) -> bool:
-        """
-        发送错误通知
-        Args:
-            error_msg: 错误信息
-            config: 配置信息
-        Returns:
-            是否发送成功
-        """
-        current_time = self._get_current_time()
+        """发送系统级异常通知，自动附带 GitHub Actions 元数据。"""
         save_dir = self._get_save_dir(config)
-
-        # 掩码敏感信息
         masked_error = self._mask_sensitive(error_msg) or error_msg
+        github_block = self._render_github_actions_block()
 
-        # 获取 GitHub Actions 运行详情
-        github_info = self._get_github_actions_info()
-        
-        # 构建消息
-        message = f"""## ⚠️ 百度网盘转存异常
-**时间**: {current_time}
-**状态**: ❌ 执行异常
-**任务类型**: 自动转存任务
-**保存目录**: {save_dir}"""
+        body_parts = [
+            ("时间", self._get_current_time()),
+            ("状态", "❌ 执行异常"),
+            ("任务类型", "自动转存任务"),
+            ("保存目录", save_dir),
+        ]
 
-        # 添加 GitHub Actions 运行详情
-        if github_info:
-            # 格式化分支/标签名称
-            ref = github_info.get('ref', '')
-            if ref:
-                ref = ref.replace('refs/heads/', '').replace('refs/tags/', '').replace('refs/pull/', 'PR-')
-            
-            message += f"""
-**GitHub Actions 详情**:
-- 仓库: `{github_info.get('repository', 'N/A')}`
-- 工作流: `{github_info.get('workflow', 'N/A')}`
-- 运行编号: `#{github_info.get('run_number', 'N/A')}`
-- 分支/标签: `{ref or 'N/A'}`
-- 提交: `{github_info.get('sha', 'N/A')}`"""
-            
-            if github_info.get('run_url'):
-                message += f"\n- 🔗 [查看运行详情]({github_info['run_url']})"
-            
-            if github_info.get('commit_url'):
-                message += f"\n- 🔗 [查看提交详情]({github_info['commit_url']})"
+        sections = [github_block] if github_block else []
+        sections.append(f"**错误信息**: {masked_error}")
+        sections.append("请检查配置或联系管理员处理。")
 
-        message += f"""
-**错误信息**: {masked_error}
-
-请检查配置或联系管理员处理。"""
-
+        message = self._render_report(
+            heading="## ⚠️ 百度网盘转存异常",
+            fields=body_parts,
+            extra_sections=sections,
+        )
         return self.send_message(message, "markdown")
 
     def send_test_message(self) -> bool:
-        """
-        发送测试消息
-        Returns:
-            是否发送成功
-        """
-        current_time = self._get_current_time()
-        message = f"""## 🔔 测试通知
-**时间**: {current_time}
-**状态**: ✅ 企业微信通知测试成功
-
-百度网盘自动转存系统已就绪！"""
-
+        message = self._render_report(
+            heading="## 🔔 测试通知",
+            fields=[
+                ("时间", self._get_current_time()),
+                ("状态", "✅ 企业微信通知测试成功"),
+            ],
+            extra_sections=["百度网盘自动转存系统已就绪！"],
+        )
         return self.send_message(message, "markdown")
+
+    # ---- 报告渲染 -----------------------------------------------------------
+
+    def _send_success_or_skipped_report(
+        self, result: Dict[str, Any], task_desc: str, save_dir: str
+    ) -> bool:
+        if result.get("skipped"):
+            result_msg = result.get("message") or result.get(
+                "summary", "没有新文件需要转存"
+            )
+            message = self._render_report(
+                heading="## 📋 百度网盘转存报告",
+                fields=[
+                    ("时间", self._get_current_time()),
+                    ("状态", "✅ 完成（无新文件）"),
+                    ("任务", task_desc),
+                    ("保存目录", save_dir),
+                    ("结果", result_msg),
+                ],
+            )
+            return self.send_message(message, "markdown")
+
+        transferred_files = collect_transferred_files(result)
+        result_msg = result.get("message") or result.get("summary", "转存成功")
+        files_section = self._format_files_block("转存文件", transferred_files, lambda x: x)
+        message = self._render_report(
+            heading="## 🎉 百度网盘转存报告",
+            fields=[
+                ("时间", self._get_current_time()),
+                ("状态", "✅ 转存成功"),
+                ("任务", task_desc),
+                ("保存目录", save_dir),
+                ("结果", result_msg),
+            ],
+            extra_sections=[files_section] if files_section else [],
+        )
+        return self.send_message(message, "markdown")
+
+    def _send_partial_report(
+        self, result: Dict[str, Any], task_desc: str, save_dir: str
+    ) -> bool:
+        error_msg = result.get("error", "部分转存成功")
+        transfer_failed_block = self._format_files_block(
+            "转存失败",
+            result.get("transfer_failed_files", []),
+            lambda item: (
+                f"{item.get('final_path') or item.get('clean_path')}: "
+                f"{item.get('error')}"
+            ),
+        )
+        rename_failed_block = self._format_files_block(
+            "重命名失败",
+            result.get("rename_failed_files", []),
+            lambda item: (
+                f"{item.get('source_path')} -> {item.get('target_path')}: "
+                f"{item.get('error')}"
+            ),
+        )
+        sections = [block for block in (transfer_failed_block, rename_failed_block) if block]
+        message = self._render_report(
+            heading="## ⚠️ 百度网盘转存报告",
+            fields=[
+                ("时间", self._get_current_time()),
+                ("状态", "⚠️ 部分成功（按失败处理，退出码 1）"),
+                ("任务", task_desc),
+                ("保存目录", save_dir),
+                ("结果", error_msg),
+            ],
+            extra_sections=sections,
+        )
+        return self.send_message(message, "markdown")
+
+    def _send_failure_report(
+        self, result: Dict[str, Any], task_desc: str, save_dir: str
+    ) -> bool:
+        error_msg = result.get("error", "未知错误")
+        message = self._render_report(
+            heading="## ❌ 百度网盘转存报告",
+            fields=[
+                ("时间", self._get_current_time()),
+                ("状态", "❌ 转存失败"),
+                ("任务", task_desc),
+                ("保存目录", save_dir),
+                ("错误信息", error_msg),
+            ],
+            extra_sections=["请检查分享链接是否有效，或查看详细日志排查问题。"],
+        )
+        return self.send_message(message, "markdown")
+
+    @staticmethod
+    def _render_report(
+        *,
+        heading: str,
+        fields: _FieldList,
+        extra_sections: Optional[List[str]] = None,
+    ) -> str:
+        lines = [heading]
+        lines.extend(f"**{name}**: {value}" for name, value in fields)
+        result = "\n".join(lines)
+        for section in extra_sections or []:
+            if not section:
+                continue
+            result = f"{result}\n{section}" if not section.startswith("\n") else f"{result}{section}"
+        return result
+
+    def _render_github_actions_block(self) -> str:
+        ctx = self._github_context_provider()
+        if ctx is None:
+            return ""
+
+        lines = [
+            "**GitHub Actions 详情**:",
+            f"- 仓库: `{ctx.repository or 'N/A'}`",
+            f"- 工作流: `{ctx.workflow or 'N/A'}`",
+            f"- 运行编号: `#{ctx.run_number or 'N/A'}`",
+            f"- 分支/标签: `{ctx.ref_label or 'N/A'}`",
+            f"- 提交: `{ctx.short_sha or 'N/A'}`",
+        ]
+        if ctx.run_url:
+            lines.append(f"- 🔗 [查看运行详情]({ctx.run_url})")
+        if ctx.commit_url:
+            lines.append(f"- 🔗 [查看提交详情]({ctx.commit_url})")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_files_block(
+        title: str,
+        items: List[Any],
+        formatter: Callable[[Any], str],
+    ) -> str:
+        if not items:
+            return ""
+        shown = items[:MAX_FILES_TO_SHOW]
+        lines = [f"\n**{title}**:"] + [f"• {formatter(item)}" for item in shown]
+        if len(items) > MAX_FILES_TO_SHOW:
+            lines.append(f"• ... 还有 {len(items) - MAX_FILES_TO_SHOW} 个文件")
+        return "\n".join(lines)
+
+    # ---- HTTP 辅助 ----------------------------------------------------------
+
+    @staticmethod
+    def _build_message_data(message: str, msg_type: str) -> Dict[str, Any]:
+        if msg_type == "text":
+            return {"msgtype": "text", "text": {"content": message}}
+        if msg_type == "markdown":
+            return {"msgtype": "markdown", "markdown": {"content": message}}
+        raise ValueError(f"不支持的消息类型: {msg_type}")
+
+    @staticmethod
+    def _classify_response(response: requests.Response) -> Tuple[bool, bool, str]:
+        """返回 (是否成功, 是否值得重试, 描述信息)。"""
+        if response.status_code != 200:
+            retryable = response.status_code in _RETRYABLE_HTTP_STATUS_CODES
+            return False, retryable, f"HTTP {response.status_code}"
+
+        try:
+            payload = response.json()
+        except ValueError:
+            return False, True, "返回内容不是合法 JSON"
+
+        errcode = payload.get("errcode")
+        if errcode == 0:
+            return True, False, "ok"
+        return False, False, payload.get("errmsg") or f"errcode={errcode}"
+
+    # ---- 工具方法 -----------------------------------------------------------
+
+    def _get_current_time(self) -> str:
+        return datetime.now(self.timezone).strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
+    def _get_save_dir(config: Optional[Dict[str, Any]]) -> str:
+        return config.get("save_dir", DEFAULT_SAVE_DIR) if config else DEFAULT_SAVE_DIR
+
+    @staticmethod
+    def _mask_sensitive(text: Optional[str]) -> Optional[str]:
+        if text is None:
+            return text
+        return mask_sensitive(text)

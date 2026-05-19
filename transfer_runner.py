@@ -521,7 +521,16 @@ def run_current_transfer(storage, logger, config, failed_records):
 
 
 def check_network_connectivity():
-    """检查网络连通性"""
+    """检查网络连通性。
+
+    默认禁用：主程序后续会自然触发对 pan.baidu.com 的真实请求，
+    再重复探测一次仅徒增 ~5-15s 启动延迟。需要诊断时设置
+    ``TRANSFERSHARE_NETWORK_PROBE=1``（仅在 GitHub Actions 环境生效，
+    与历史行为保持一致）。
+    """
+    if os.getenv("TRANSFERSHARE_NETWORK_PROBE", "0") != "1":
+        return
+
     try:
         import requests
 

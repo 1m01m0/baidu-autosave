@@ -310,7 +310,7 @@ python transfer_runner.py
 **GitHub Actions 运维与安全：**
 - 定时转存每 6 小时的第 17 分钟触发，并通过并发锁串行同一分支的转存任务，不取消正在运行的任务。
 - workflow 使用 `permissions: contents: read`，checkout 显式设置 `persist-credentials: false`。
-- 测试 workflow 会运行 `actionlint`，并在 Python 3.9 到 Python 3.12 的 matrix 上执行单测。
+- 测试 workflow 会运行 `actionlint`，并在 Python 3.9 与 Python 3.12 的 matrix 上执行单测（最低 / 最高版本）。
 - 定时脚本第一次运行超时为 7 分钟，失败后等待 5 秒重试，第二次运行超时为 10 分钟。
 - Cookie 日志默认脱敏；`save_baidu_cookies.py --show-full-cookie` 只用于可信本地终端的临时排查。
 

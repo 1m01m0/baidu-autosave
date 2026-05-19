@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 
 from collections import Counter
-from dataclasses import dataclass, field
 
 import os
 import posixpath
@@ -14,6 +13,7 @@ import time
 from wechat_notifier import WeChatNotifier
 from utils import handle_error_and_notify, ErrorCollector, mask_share_url
 from config_utils import build_retry_share_config, parse_share_links_from_text
+from env_utils import read_non_negative_float_env, read_positive_int_env
 from storage_client import BaiduClientAdapter
 from storage_errors import (
     classify_storage_error,
@@ -22,6 +22,7 @@ from storage_errors import (
     is_transfer_count_limit_error,
     parse_share_error,
 )
+from storage_models import DirTreeFrame, TransferItem
 from storage_paths import StoragePathService
 from storage_rules import (
     REGEX_FILTER_UNMATCHED,
@@ -42,107 +43,55 @@ except ImportError:
         return logging.getLogger(name)
 
 
-def _read_non_negative_float_env(name, default):
-    raw_value = os.getenv(name)
-    if raw_value is None:
-        return default
-    try:
-        value = float(raw_value)
-    except (TypeError, ValueError):
-        return default
-    return value if value >= 0 else default
-
-
-def _read_positive_int_env(name, default):
-    raw_value = os.getenv(name)
-    if raw_value is None:
-        return default
-    try:
-        value = int(raw_value)
-    except (TypeError, ValueError):
-        return default
-    return value if value >= 1 else default
+# 兼容老测试：保留下划线开头的别名
+_read_non_negative_float_env = read_non_negative_float_env
+_read_positive_int_env = read_positive_int_env
+_DirTreeFrame = DirTreeFrame
 
 
 # 常量定义
 RATE_LIMIT_WAIT_TIME = 10
-RENAME_DELAY = _read_non_negative_float_env("TRANSFERSHARE_RENAME_DELAY", 0.5)
-BATCH_SHARE_DELAY = _read_non_negative_float_env("TRANSFERSHARE_BATCH_SHARE_DELAY", 2)
-TRANSFER_BATCH_SIZE = _read_positive_int_env("TRANSFERSHARE_TRANSFER_BATCH_SIZE", 999)
-TRANSFER_FAILED_RETRY_ATTEMPTS = _read_positive_int_env(
+# 重命名相邻调用间的固定延时；默认 0，因 call_with_retry 已处理限频。
+# 历史默认值是 0.5s，保留为可调 env，若用户遇到限频可手动调高。
+RENAME_DELAY = read_non_negative_float_env("TRANSFERSHARE_RENAME_DELAY", 0)
+# 重命名并发度；默认串行，>1 时启用 ThreadPoolExecutor，触发限频会自动退避。
+RENAME_CONCURRENCY = read_positive_int_env("TRANSFERSHARE_RENAME_CONCURRENCY", 1)
+BATCH_SHARE_DELAY = read_non_negative_float_env("TRANSFERSHARE_BATCH_SHARE_DELAY", 0)
+# 多链接并发执行的 worker 数。默认 1（串行），>1 时让多个独立分享的转存
+# 流水线重叠执行。注意：百度对同一账号有 list/transfer 限频，并发过高会
+# 触发 error_code: -65；建议从 2 起步实测，推荐上限 4。
+MULTI_SHARE_CONCURRENCY = read_positive_int_env(
+    "TRANSFERSHARE_MULTI_SHARE_CONCURRENCY", 1
+)
+TRANSFER_BATCH_SIZE = read_positive_int_env("TRANSFERSHARE_TRANSFER_BATCH_SIZE", 999)
+TRANSFER_FAILED_RETRY_ATTEMPTS = read_positive_int_env(
     "TRANSFERSHARE_TRANSFER_FAILED_RETRY_ATTEMPTS", 2
 )
-TRANSFER_FAILED_RETRY_DELAY = _read_non_negative_float_env(
+TRANSFER_FAILED_RETRY_DELAY = read_non_negative_float_env(
     "TRANSFERSHARE_TRANSFER_FAILED_RETRY_DELAY", 5
 )
-STREAM_PRODUCER_JOIN_TIMEOUT = _read_non_negative_float_env(
+STREAM_PRODUCER_JOIN_TIMEOUT = read_non_negative_float_env(
     "TRANSFERSHARE_STREAM_PRODUCER_JOIN_TIMEOUT", 5
 )
+# Streaming 路径上的"扫描-转存"双缓冲开关。默认启用：把 _execute_transfer_plan
+# 调用丢给单个 worker 线程异步执行，主线程立即回去消费扫描队列，从而让网络
+# 调用与后续扫描重叠。worker 数固定为 1，避免对同一账号触发并发转存限频。
+TRANSFER_PIPELINE_ENABLED = read_positive_int_env(
+    "TRANSFERSHARE_TRANSFER_PIPELINE", 1
+) >= 1
 
 
-@dataclass(frozen=True, eq=False)
-class TransferItem:
-    fs_id: int
-    dir_path: str
-    clean_path: str
-    final_path: str
-    need_rename: bool
-    src_md5: str = None
-    _payload: tuple = field(init=False, repr=False)
+# 兼容 BaiduStorage.__new__(BaiduStorage) 绕过 __init__ 的测试代码：
+# 当实例没有 _shared_state_lock 属性时，用一个总是放行的锁占位。
+class _NullLock:
+    def __enter__(self):
+        return self
 
-    def __post_init__(self):
-        object.__setattr__(
-            self,
-            "_payload",
-            (
-                self.fs_id,
-                self.dir_path,
-                self.clean_path,
-                self.final_path,
-                self.need_rename,
-            ),
-        )
-
-    def as_tuple(self):
-        return self._payload
-
-    def __iter__(self):
-        return iter(self.as_tuple())
-
-    def __len__(self):
-        return 5
-
-    def __getitem__(self, index):
-        return self.as_tuple()[index]
-
-    def count(self, value):
-        return self.as_tuple().count(value)
-
-    def index(self, value, *args):
-        return self.as_tuple().index(value, *args)
-
-    def __eq__(self, other):
-        if isinstance(other, TransferItem):
-            return self.as_tuple() == other.as_tuple()
-        if isinstance(other, tuple):
-            return self.as_tuple() == other
+    def __exit__(self, *args):
         return False
 
-    def __hash__(self):
-        return hash(self.as_tuple())
 
-
-@dataclass
-class _DirTreeFrame:
-    shared_dir: object
-    target_dir: str
-    child_iter: object = None
-    child_count: int = 0
-    file_transfer_list: list = field(default_factory=list)
-
-    @property
-    def shared_dir_path(self):
-        return getattr(self.shared_dir, "path", self.shared_dir)
+_NULL_LOCK = _NullLock()
 
 
 class BaiduStorage:
@@ -151,10 +100,15 @@ class BaiduStorage:
             WeChatNotifier(wechat_webhook) if wechat_webhook else None
         )
         self._local_files_cache = {}
+        # 多链接并发场景下保护共享可变状态（_local_files_cache 的写/iter）。
+        # _ensured_dirs（path_service 内）的并发竞态可以容忍——重复 makedir 走"已存在"
+        # 错误码后是幂等的，付出的代价只是若干次浪费的 API 调用，不影响正确性。
+        self._shared_state_lock = threading.RLock()
         self.client = BaiduClientAdapter(cookies)
         self.path_service = StoragePathService(
             self.client, self.wechat_notifier, self._local_files_cache
         )
+        self.path_service.shared_state_lock = self._shared_state_lock
         self.share_service = SharedPathService(self.client, self.wechat_notifier)
 
     def set_notifier(self, notifier):
@@ -298,6 +252,99 @@ class BaiduStorage:
             collect=True,
         )
 
+    def _run_one_share_config_safely(
+        self, index, total_count, config, progress_callback
+    ):
+        """对单个 share_config 执行 _process_single_share_config，捕获意外异常。
+
+        返回 result_record（始终是 dict）；异常路径下也会构造一个失败 record。
+        在并发模式下被多个 worker 调用，依赖：
+        - _process_single_share_config 内部已自处理常规错误
+        - ErrorCollector 是 thread-local，worker 内的 collect 不会污染主线程
+        """
+        try:
+            return self._process_single_share_config(
+                index, total_count, config, progress_callback
+            )
+        except Exception as e:
+            error_info = classify_storage_error(e)
+            error_msg = f"处理第 {index} 个分享链接时发生异常: {error_info.message}"
+            share_url = (
+                config.get("share_url", "未知") if isinstance(config, dict) else "未知"
+            )
+            masked_share_url = mask_share_url(share_url) or share_url
+            self._notify_batch_progress(
+                "error",
+                index,
+                total_count,
+                f"异常: {error_info.message}",
+                progress_callback,
+            )
+            handle_error_and_notify(
+                e,
+                f"处理第 {index} 个分享链接时发生异常\n分享链接: {masked_share_url}",
+                self.wechat_notifier,
+                None,
+                collect=True,
+            )
+            return {
+                "index": index,
+                "share_url": masked_share_url,
+                "success": False,
+                "partial": False,
+                "error": error_msg,
+            }
+
+    def _run_share_configs(
+        self, share_configs, total_count, counters, progress_callback, concurrency
+    ):
+        """串行或并发地执行 share_configs，返回按原索引顺序排列的 result 列表。
+
+        计数器累加统一在所有结果就绪后做，避免在串行/并发两条路径中重复累加。
+        """
+        if concurrency <= 1:
+            results = []
+            for index, config in enumerate(share_configs, 1):
+                result_record = self._run_one_share_config_safely(
+                    index, total_count, config, progress_callback
+                )
+                results.append(result_record)
+                if index < total_count:
+                    # 即便 BATCH_SHARE_DELAY=0 也调用 sleep(0)，保留与历史
+                    # 串行行为一致的契约（部分测试断言相邻链接间 sleep 被调用）。
+                    time.sleep(BATCH_SHARE_DELAY)
+        else:
+            # 并发路径：worker 各自调用 _run_one_share_config_safely。
+            # 结果按原索引占位合并，保证 results 顺序与串行实现一致。
+            from concurrent.futures import ThreadPoolExecutor
+
+            results = [None] * total_count
+            with ThreadPoolExecutor(
+                max_workers=concurrency, thread_name_prefix="transfershare-share"
+            ) as executor:
+                future_index = {}
+                for index, config in enumerate(share_configs, 1):
+                    # 启动错峰：以 BATCH_SHARE_DELAY 为间隔提交，避免一瞬间打出 N 个分享
+                    # 访问请求触发限频。BATCH_SHARE_DELAY 默认 0；用户可设非零做软节流。
+                    if index > 1 and BATCH_SHARE_DELAY > 0:
+                        time.sleep(BATCH_SHARE_DELAY)
+                    future = executor.submit(
+                        self._run_one_share_config_safely,
+                        index,
+                        total_count,
+                        config,
+                        progress_callback,
+                    )
+                    future_index[future] = index - 1
+                for future in future_index:
+                    slot = future_index[future]
+                    results[slot] = future.result()
+
+        # 计数器在主线程顺序累加，避免并发竞争 counters dict
+        for result_record in results:
+            self._record_batch_result(counters, result_record)
+        return results
+
     def _process_single_share_config(self, index, total_count, config, progress_callback=None):
         if not isinstance(config, dict) or "share_url" not in config:
             result_record = self._build_invalid_share_result(index, config)
@@ -403,7 +450,8 @@ class BaiduStorage:
                     "results": [],
                 }
 
-            self._local_files_cache.clear()
+            # 不再清空 self._local_files_cache：精确失效在 _execute_transfer_plan 内
+            # 完成；保留 cache 让多链接落到同 target_dir 下兄弟子目录时可以复用扫描结果。
             total_count = len(share_configs)
             counters = {
                 "success_count": 0,
@@ -411,42 +459,13 @@ class BaiduStorage:
                 "failed_count": 0,
                 "skipped_count": 0,
             }
-            results = []
 
-            for index, config in enumerate(share_configs, 1):
-                try:
-                    result_record = self._process_single_share_config(
-                        index, total_count, config, progress_callback
-                    )
-                    self._record_batch_result(counters, result_record)
-                    results.append(result_record)
-                    if index < total_count:
-                        time.sleep(BATCH_SHARE_DELAY)
-                except Exception as e:
-                    error_info = classify_storage_error(e)
-                    error_msg = f"处理第 {index} 个分享链接时发生异常: {error_info.message}"
-                    share_url = config.get("share_url", "未知") if isinstance(config, dict) else "未知"
-                    masked_share_url = mask_share_url(share_url) or share_url
-                    results.append(
-                        {
-                            "index": index,
-                            "share_url": masked_share_url,
-                            "success": False,
-                            "partial": False,
-                            "error": error_msg,
-                        }
-                    )
-                    counters["failed_count"] += 1
-                    self._notify_batch_progress(
-                        "error", index, total_count, f"异常: {error_info.message}", progress_callback
-                    )
-                    handle_error_and_notify(
-                        e,
-                        f"处理第 {index} 个分享链接时发生异常\n分享链接: {masked_share_url}",
-                        self.wechat_notifier,
-                        None,
-                        collect=True,
-                    )
+            # 多链接并发：默认 1（串行），>1 时让多个独立分享的转存流水线重叠。
+            # 受百度限频影响，并发上限建议 ≤4。
+            concurrency = max(1, min(MULTI_SHARE_CONCURRENCY, total_count))
+            results = self._run_share_configs(
+                share_configs, total_count, counters, progress_callback, concurrency
+            )
 
             has_partial_items = counters["partial_count"] > 0
             has_failed_items = counters["failed_count"] > 0
@@ -758,11 +777,15 @@ class BaiduStorage:
             self.path_service.normalize_path(file_info["file_name"], file_only=True)
             for file_info in local_files
         ]
-        name_counts = Counter(file_names)
-        dup_names = [name for name, count in name_counts.items() if count > 1]
+        # 重复名检测：先用 set 与 list 长度差异早判，绝大多数没有重名的目录
+        # 直接走 fast path，避免在大目录上无谓地走完整 Counter。
+        unique_names = set(file_names)
+        has_duplicates = len(unique_names) != len(file_names)
 
         logger = get_logger()
-        if dup_names:
+        if has_duplicates:
+            name_counts = Counter(file_names)
+            dup_names = [name for name, count in name_counts.items() if count > 1]
             dup_name_set = set(dup_names)
             paths_by_name = {name: [] for name in dup_names}
             for file_info, file_name in zip(local_files, file_names):
@@ -1017,21 +1040,79 @@ class BaiduStorage:
             candidates, local_files_dict, summary, progress_callback
         )
 
-    def _clear_local_files_cache(self, target_dir):
+    def _clear_local_files_cache(self, target_dir, affected_relative_dirs=None):
+        """清理指定 target_dir 下的本地文件 cache。
+
+        Args:
+            target_dir: 目标目录路径
+            affected_relative_dirs: 本次只清理这些相对子目录下的 cache 条目；
+                None 时全清（保留旧行为，用于失败重试等保守场景）
+        """
         normalized_target_dir = self.path_service.normalize_path(target_dir)
-        cache_keys = [
-            key
-            for key in self._local_files_cache
-            if key == normalized_target_dir
-            or (isinstance(key, tuple) and key and key[0] == normalized_target_dir)
-        ]
-        for key in cache_keys:
-            self._local_files_cache.pop(key, None)
+
+        # 多链接并发下，迭代和 pop 必须互斥保护，防止 RuntimeError: dict changed size。
+        # 测试中常用 BaiduStorage.__new__ 绕过 __init__，此时无锁；用 getattr 兜底。
+        lock = getattr(self, "_shared_state_lock", None) or _NULL_LOCK
+        with lock:
+            if not affected_relative_dirs:
+                # 全清：与历史行为一致
+                cache_keys = [
+                    key
+                    for key in self._local_files_cache
+                    if key == normalized_target_dir
+                    or (isinstance(key, tuple) and key and key[0] == normalized_target_dir)
+                ]
+                for key in cache_keys:
+                    self._local_files_cache.pop(key, None)
+                return
+
+            # 精确失效：仅清掉与受影响目录有交集的 cache key
+            normalized_affected = {
+                self.path_service._normalize_relative_dir(d) for d in affected_relative_dirs
+            }
+            cache_keys = []
+            for key in self._local_files_cache:
+                # list_local_files 缓存的整目录条目
+                if key == normalized_target_dir:
+                    cache_keys.append(key)
+                    continue
+                # list_local_files_in_dirs 的 (target, relative_dirs_tuple, merge) 元组键
+                if (
+                    isinstance(key, tuple)
+                    and len(key) >= 2
+                    and key[0] == normalized_target_dir
+                    and isinstance(key[1], tuple)
+                ):
+                    cache_relative_dirs = set(key[1])
+                    if cache_relative_dirs & normalized_affected:
+                        cache_keys.append(key)
+            for key in cache_keys:
+                self._local_files_cache.pop(key, None)
 
     @staticmethod
     def _transfer_item_key(item):
         fs_id, dir_path, clean_path, final_path, _ = item
         return (str(fs_id), dir_path or "", clean_path or "", final_path or "")
+
+    def _affected_relative_dirs(self, transfer_list, target_dir):
+        """从 transfer_list 与 target_dir 反推本批写入涉及的相对子目录集合。"""
+        if not target_dir:
+            return set()
+        normalized_target = self.path_service.normalize_path(target_dir).rstrip("/")
+        target_prefix = f"{normalized_target}/"
+        affected = set()
+        for item in transfer_list:
+            _, dir_path, clean_path, final_path, _ = item[:5]
+            for path in (clean_path, final_path):
+                affected.update(self._candidate_parent_dirs(path))
+            # dir_path 是绝对路径，提取它相对 target_dir 的部分
+            if dir_path:
+                normalized_dir = self.path_service.normalize_path(dir_path)
+                if normalized_dir == normalized_target:
+                    affected.add("")
+                elif normalized_dir.startswith(target_prefix):
+                    affected.add(normalized_dir[len(target_prefix):])
+        return affected
 
     def _build_transfer_failed_record(self, item, error_info):
         fs_id, dir_path, clean_path, final_path, _ = item
@@ -1399,68 +1480,140 @@ class BaiduStorage:
                     attempt += 1
         finally:
             if local_files_cache_touched and target_dir:
-                self._clear_local_files_cache(target_dir)
+                # 精确失效：只清掉本批 transfer 实际写入的相对子目录的 cache，
+                # 保留同 target_dir 下兄弟子目录的 cache 给后续链接复用。
+                affected = self._affected_relative_dirs(transfer_list, target_dir)
+                self._clear_local_files_cache(target_dir, affected)
 
         return len(successful_transfer_items), successful_transfer_items, list(failed_records.values())
+
+    def _rename_one_transferred_file(self, dir_path, clean_path, final_path, target_dir, progress_callback=None):
+        """对单个文件执行重命名，返回成功路径或抛异常。"""
+        if not is_safe_relative_target_path(final_path):
+            raise ValueError(f"重命名目标路径不安全: {final_path}")
+        original_full_path = posixpath.join(target_dir, clean_path)
+        final_full_path = posixpath.join(target_dir, final_path)
+        final_parent_dir = posixpath.dirname(final_full_path).replace("\\", "/")
+
+        if final_parent_dir and final_parent_dir != dir_path:
+            if not self.path_service.ensure_dir_exists(final_parent_dir):
+                raise ValueError(f"创建重命名目标目录失败: {final_parent_dir}")
+
+        if progress_callback:
+            progress_callback("info", f"重命名文件: {clean_path} -> {final_path}")
+
+        self.client.rename(original_full_path, final_full_path)
+        return final_path
 
     def _rename_transferred_files(self, successful_transfer_items, target_dir, progress_callback=None):
         renamed_files = []
         rename_failed_files = []
         completed_count = 0
-        rename_total = sum(1 for item in successful_transfer_items if item[4])
-        rename_attempt = 0
-        for _, dir_path, clean_path, final_path, need_rename in successful_transfer_items:
+
+        # 提前分两类：无需重命名的直接计入，需要重命名的进队列
+        rename_jobs = []
+        for item in successful_transfer_items:
+            _, dir_path, clean_path, final_path, need_rename = item[:5]
             if not need_rename:
                 renamed_files.append(final_path)
                 completed_count += 1
-                continue
-            try:
-                if not is_safe_relative_target_path(final_path):
-                    raise ValueError(f"重命名目标路径不安全: {final_path}")
-                original_full_path = posixpath.join(target_dir, clean_path)
-                final_full_path = posixpath.join(target_dir, final_path)
-                final_parent_dir = posixpath.dirname(final_full_path).replace("\\", "/")
+            else:
+                rename_jobs.append((dir_path, clean_path, final_path))
 
-                if final_parent_dir and final_parent_dir != dir_path:
-                    if not self.path_service.ensure_dir_exists(final_parent_dir):
-                        raise ValueError(f"创建重命名目标目录失败: {final_parent_dir}")
+        rename_total = len(rename_jobs)
+        if rename_total == 0:
+            return {
+                "transferred_files": renamed_files,
+                "rename_failed_files": rename_failed_files,
+                "rename_failed_count": 0,
+                "completed_count": completed_count,
+            }
 
-                if progress_callback:
-                    progress_callback("info", f"重命名文件: {clean_path} -> {final_path}")
+        concurrency = max(1, min(RENAME_CONCURRENCY, rename_total))
 
-                rename_attempt += 1
-                self.client.rename(original_full_path, final_full_path)
-                renamed_files.append(final_path)
-                completed_count += 1
-                if rename_attempt < rename_total:
-                    time.sleep(RENAME_DELAY)
-            except Exception as e:
-                error_info = classify_storage_error(e)
-                error_msg = (
-                    f"重命名文件失败: {os.path.basename(clean_path)} -> {os.path.basename(final_path)}"
-                )
-                if progress_callback:
-                    progress_callback("error", f"{error_msg}: {error_info.message}")
-                handle_error_and_notify(
-                    e,
-                    f"重命名文件失败\n原始文件: {os.path.basename(clean_path)}\n目标文件: {os.path.basename(final_path)}",
-                    self.wechat_notifier,
-                    None,
-                    collect=True,
-                )
-                rename_failed_files.append(
-                    {
-                        "source_path": clean_path,
-                        "target_path": final_path,
-                        "error": error_info.message,
-                    }
-                )
+        if concurrency == 1:
+            # 串行路径：保持历史行为（含相邻 sleep），方便受限场景排查
+            for index, (dir_path, clean_path, final_path) in enumerate(rename_jobs):
+                try:
+                    result = self._rename_one_transferred_file(
+                        dir_path, clean_path, final_path, target_dir, progress_callback
+                    )
+                    renamed_files.append(result)
+                    completed_count += 1
+                    if index < rename_total - 1:
+                        time.sleep(RENAME_DELAY)
+                except Exception as exc:
+                    self._record_rename_failure(
+                        clean_path, final_path, exc, rename_failed_files, progress_callback
+                    )
+            return {
+                "transferred_files": renamed_files,
+                "rename_failed_files": rename_failed_files,
+                "rename_failed_count": len(rename_failed_files),
+                "completed_count": completed_count,
+            }
+
+        # 并发路径：用 ThreadPoolExecutor，rename 内部已走 call_with_retry，
+        # 限频时自动退避。这里只关心结果汇总，不再额外加 sleep。
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        with ThreadPoolExecutor(
+            max_workers=concurrency, thread_name_prefix="transfershare-rename"
+        ) as executor:
+            future_map = {
+                executor.submit(
+                    self._rename_one_transferred_file,
+                    dir_path,
+                    clean_path,
+                    final_path,
+                    target_dir,
+                    progress_callback,
+                ): (clean_path, final_path)
+                for dir_path, clean_path, final_path in rename_jobs
+            }
+            for future in as_completed(future_map):
+                clean_path, final_path = future_map[future]
+                try:
+                    result = future.result()
+                    renamed_files.append(result)
+                    completed_count += 1
+                except Exception as exc:
+                    self._record_rename_failure(
+                        clean_path, final_path, exc, rename_failed_files, progress_callback
+                    )
+
         return {
             "transferred_files": renamed_files,
             "rename_failed_files": rename_failed_files,
             "rename_failed_count": len(rename_failed_files),
             "completed_count": completed_count,
         }
+
+    def _record_rename_failure(
+        self, clean_path, final_path, exc, rename_failed_files, progress_callback
+    ):
+        error_info = classify_storage_error(exc)
+        error_msg = (
+            f"重命名文件失败: {os.path.basename(clean_path)} -> "
+            f"{os.path.basename(final_path)}"
+        )
+        if progress_callback:
+            progress_callback("error", f"{error_msg}: {error_info.message}")
+        handle_error_and_notify(
+            exc,
+            f"重命名文件失败\n原始文件: {os.path.basename(clean_path)}\n"
+            f"目标文件: {os.path.basename(final_path)}",
+            self.wechat_notifier,
+            None,
+            collect=True,
+        )
+        rename_failed_files.append(
+            {
+                "source_path": clean_path,
+                "target_path": final_path,
+                "error": error_info.message,
+            }
+        )
 
     def _build_transfer_result(
         self,
@@ -2077,6 +2230,78 @@ class BaiduStorage:
         transfer_failed_files = []
         dir_error = None
 
+        # 转存流水线：用单 worker 让 transfer API 调用与后续扫描重叠。
+        # in-flight 始终至多 1 个，避免对同一账号产生并发限频压力。
+        transfer_executor = None
+        pending_transfer = {"future": None, "items": None}
+        if TRANSFER_PIPELINE_ENABLED:
+            from concurrent.futures import ThreadPoolExecutor
+
+            transfer_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="transfershare-transfer"
+            )
+
+        def _run_transfer_plan(transfer_list):
+            """worker 线程内执行：返回 (success_count, successful_items, failed_items)。"""
+            return self._execute_transfer_plan(
+                transfer_list,
+                share_url,
+                context["uk"],
+                context["share_id"],
+                context["bdstoken"],
+                transfer_target_dir,
+                progress_callback,
+            )
+
+        def _drain_pending_transfer():
+            """同步等待 in-flight transfer 完成，并在主线程更新共享状态。"""
+            nonlocal total_transfer_count, transfer_success_count
+            future = pending_transfer["future"]
+            if future is None:
+                return None
+            transfer_list = pending_transfer["items"]
+            pending_transfer["future"] = None
+            pending_transfer["items"] = None
+            try:
+                success_count, successful_items, failed_items = future.result()
+            except Exception as exc:
+                # _execute_transfer_plan 自身已经把绝大多数异常吞掉转成 failed_items；
+                # 这里走兜底，把整批列为失败，避免单 batch 异常拖垮整个 streaming。
+                error_info = classify_storage_error(exc)
+                handle_error_and_notify(
+                    exc,
+                    "流水线转存批次异常",
+                    self.wechat_notifier,
+                    None,
+                    collect=True,
+                )
+                total_transfer_count += len(transfer_list)
+                transfer_failed_files.extend(
+                    self._build_transfer_failed_record(item, error_info)
+                    for item in transfer_list
+                )
+                return None
+
+            total_transfer_count += len(transfer_list)
+            transfer_success_count += success_count
+            successful_transfer_items.extend(successful_items)
+            for item in successful_items:
+                self._record_transfer_item_paths(item, local_files_dict)
+            transfer_failed_files.extend(failed_items)
+            return None
+
+        def _submit_transfer_plan(transfer_list):
+            """提交一批 transfer 到 worker。如已存在 in-flight 则先等其完成。"""
+            if not transfer_list:
+                return
+            if pending_transfer["future"] is not None:
+                # 流水线深度固定为 1：先 drain 上一批
+                _drain_pending_transfer()
+            pending_transfer["future"] = transfer_executor.submit(
+                _run_transfer_plan, transfer_list
+            )
+            pending_transfer["items"] = transfer_list
+
         def flush_transfer_item_buffer(force=False):
             nonlocal total_transfer_count, transfer_success_count, dir_error
             if not transfer_item_buffer:
@@ -2090,6 +2315,8 @@ class BaiduStorage:
 
             dir_error = self._ensure_transfer_dirs(transfer_list)
             if dir_error:
+                # 创建目录失败前必须把 in-flight transfer 落定，避免计数对不上
+                _drain_pending_transfer()
                 error_info = classify_storage_error(dir_error.get("error", "创建目录失败"))
                 transfer_failed_files.extend(
                     self._build_transfer_failed_record(item, error_info)
@@ -2098,26 +2325,28 @@ class BaiduStorage:
                 total_transfer_count += len(transfer_list)
                 return dir_error
 
-            success_count, successful_items, failed_items = self._execute_transfer_plan(
-                transfer_list,
-                share_url,
-                context["uk"],
-                context["share_id"],
-                context["bdstoken"],
-                transfer_target_dir,
-                progress_callback,
-            )
-            total_transfer_count += len(transfer_list)
-            transfer_success_count += success_count
-            successful_transfer_items.extend(successful_items)
-            for item in successful_items:
-                self._record_transfer_item_paths(item, local_files_dict)
-            transfer_failed_files.extend(failed_items)
+            if transfer_executor is None:
+                # 同步路径：保持旧行为，立即调用并更新主线程状态
+                success_count, successful_items, failed_items = _run_transfer_plan(transfer_list)
+                total_transfer_count += len(transfer_list)
+                transfer_success_count += success_count
+                successful_transfer_items.extend(successful_items)
+                for item in successful_items:
+                    self._record_transfer_item_paths(item, local_files_dict)
+                transfer_failed_files.extend(failed_items)
+                return None
+
+            # 异步路径：提交到 worker，主线程立即返回继续消费 stream
+            _submit_transfer_plan(transfer_list)
             return None
 
         def flush_shared_file_batch():
             if not shared_file_batch:
                 return None
+
+            # 即将基于 local_files_dict 做去重判定，先 drain in-flight transfer，
+            # 让上一批转存写入的 normalized path 对当前比对可见（避免重复转存）。
+            _drain_pending_transfer()
 
             candidates, batch_summary, relative_dirs = self._prepare_transfer_candidates(
                 shared_file_batch,
@@ -2163,11 +2392,16 @@ class BaiduStorage:
                 dir_error = flush_shared_file_batch()
             if not dir_error:
                 dir_error = flush_transfer_item_buffer(force=True)
+
+            # 收尾：等待最后一个 in-flight transfer
+            _drain_pending_transfer()
         finally:
             stop_event.set()
             producer_thread.join(STREAM_PRODUCER_JOIN_TIMEOUT)
             if producer_thread.is_alive():
                 get_logger().warning("共享文件扫描线程未及时退出，继续处理已完成结果")
+            if transfer_executor is not None:
+                transfer_executor.shutdown(wait=True)
 
         self._report_transfer_candidate_summary(
             summary, warning_samples, progress_callback

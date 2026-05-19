@@ -3,12 +3,20 @@
 
 import os
 
+from env_utils import read_positive_int_env
 from storage_rules import extract_file_info, should_exclude_folder, should_include_folder
 from utils import handle_error_and_notify
 
 
+# 百度分享目录列表分页 size。官方接口实测可支持到 ~1000。
+# 默认保持 100 兼容现有测试断言；用户可通过环境变量调高来减少多页扫描的网络往返。
+_DEFAULT_SHARED_DIR_PAGE_SIZE = read_positive_int_env(
+    "TRANSFERSHARE_SHARED_PAGE_SIZE", 100
+)
+
+
 class SharedPathService:
-    SHARED_DIR_PAGE_SIZE = 100
+    SHARED_DIR_PAGE_SIZE = _DEFAULT_SHARED_DIR_PAGE_SIZE
     PROGRESS_DIR_INTERVAL = 20
     PROGRESS_PAGE_INTERVAL = 20
     PROGRESS_FILE_INTERVAL = 500

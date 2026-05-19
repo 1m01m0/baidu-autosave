@@ -294,6 +294,24 @@ https://pan.baidu.com/s/1example3?pwd=abcd /我的文件/资料
 
 > 失败清单可能包含分享链接、提取码和文件路径。GitHub Actions 只会缓存 `.transfershare_failed_transfers.json.enc`，不会缓存明文失败清单。可用 `openssl rand -base64 32` 生成 `TRANSFERSHARE_STATE_KEY`。
 
+### ⚡ 性能调优（可选）
+
+所有性能相关环境变量都有合理默认值，仅在已观察到瓶颈时才需要调整。
+
+| 环境变量 | 默认值 | 说明 |
+|---|---|---|
+| `TRANSFERSHARE_MULTI_SHARE_CONCURRENCY` | `1` | 多链接并发转存 worker 数。`>1` 让多个独立分享的流水线重叠；建议 ≤ 4，过高会触发百度 `error_code: -65` 限频 |
+| `TRANSFERSHARE_LOCAL_SCAN_CONCURRENCY` | `1` | 本地目录扫描并发 worker 数。多个独立子目录扫描可并行 |
+| `TRANSFERSHARE_RENAME_CONCURRENCY` | `1` | 重命名并发 worker 数。`>1` 显著加速大量文件的重命名 |
+| `TRANSFERSHARE_TRANSFER_PIPELINE` | `1` | 流水线双缓冲开关，`0` 退回到同步实现 |
+| `TRANSFERSHARE_PCS_POOL_MAXSIZE` | 自动 | HTTPAdapter 连接池容量；自动按 `max(32, MULTI*FANOUT)` 决定，GA 环境 +8。显式设 `0` 可禁用连接池调优 |
+| `TRANSFERSHARE_PCS_POOL_FANOUT` | `4` | 每个并发链接预留的连接数倍率，仅在自动模式下生效 |
+| `TRANSFERSHARE_PCS_DEBUG_POOL` | `0` | 设 `1` 时在 DEBUG 级别打印每次 API 完成后的连接池状态，便于排查"并发上去了吞吐没涨"的问题 |
+| `TRANSFERSHARE_BATCH_SHARE_DELAY` | `0` | 链接间软节流（秒）。仅在并发触发限频时调高 |
+| `TRANSFERSHARE_RENAME_DELAY` | `0` | 重命名间软节流（秒）。仅在 rename 触发限频时调高 |
+
+并发改造之间是相互独立的；推荐启用顺序：先开 `TRANSFERSHARE_RENAME_CONCURRENCY=4`（最直接的耗时降幅），再开 `TRANSFERSHARE_MULTI_SHARE_CONCURRENCY=2~4`，最后视情况调 `TRANSFERSHARE_PCS_POOL_MAXSIZE`。
+
 ## ▶️ 使用方法
 
 ### 自动执行
@@ -303,7 +321,7 @@ https://pan.baidu.com/s/1example3?pwd=abcd /我的文件/资料
 GitHub Actions 运维与安全说明：
 - 转存 workflow 配置了并发锁，同一分支的新转存不会取消正在运行的任务，避免同时写入失败清单和目标目录状态。
 - checkout 使用 `persist-credentials: false`，workflow 只授予 `permissions: contents: read`。
-- 测试 workflow 使用 `actionlint` 校验 Actions 语法，并在 Python 3.9 到 Python 3.12 的 matrix 上运行单测。
+- 测试 workflow 使用 `actionlint` 校验 Actions 语法，并在 Python 3.9 与 Python 3.12 的 matrix 上运行单测（最低 / 最高版本）。
 - 定时转存脚本第一次运行超时为 7 分钟，失败后等待 5 秒重试，第二次运行超时为 10 分钟。
 - 失败清单只通过 `.transfershare_failed_transfers.json.enc` 加密缓存；未配置 `TRANSFERSHARE_STATE_KEY` 时不跨 run 保存或恢复历史失败状态。
 - Cookie 输出默认脱敏，`--show-full-cookie` 只建议在可信本地终端临时排查时使用。
