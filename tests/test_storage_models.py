@@ -70,9 +70,33 @@ class TransferResultTests(unittest.TestCase):
         self.assertEqual(3, result.skipped_count)
         self.assertEqual("部分成功", result.error_details)
 
-    def test_from_dict_requires_compatible_keys(self):
-        with self.assertRaisesRegex(KeyError, "partial"):
-            TransferResult.from_dict({"success": True})
+    def test_from_dict_accepts_error_only_failure_shape(self):
+        result = TransferResult.from_dict({"success": False, "error": "失败"})
+
+        self.assertFalse(result.success)
+        self.assertFalse(result.partial)
+        self.assertEqual("失败", result.message)
+        self.assertEqual([], result.transferred_files)
+        self.assertEqual([], result.failed_files)
+        self.assertEqual(0, result.skipped_count)
+        self.assertEqual("失败", result.error_details)
+
+    def test_from_dict_accepts_skipped_success_shape(self):
+        result = TransferResult.from_dict(
+            {"success": True, "skipped": True, "message": "没有新文件"}
+        )
+
+        self.assertTrue(result.success)
+        self.assertFalse(result.partial)
+        self.assertEqual("没有新文件", result.message)
+        self.assertEqual([], result.transferred_files)
+        self.assertEqual([], result.failed_files)
+        self.assertEqual(0, result.skipped_count)
+        self.assertIsNone(result.error_details)
+
+    def test_from_dict_requires_success_key(self):
+        with self.assertRaisesRegex(KeyError, "success"):
+            TransferResult.from_dict({})
 
 
 class TransferResultBuilderTests(unittest.TestCase):
@@ -121,6 +145,20 @@ class TransferResultBuilderTests(unittest.TestCase):
         self.assertEqual("部分成功", result.message)
         self.assertEqual([{"path": "ok.mp4"}], result.transferred_files)
         self.assertEqual([{"path": "bad.mp4"}], result.failed_files)
+
+    def test_builder_failed_file_without_partial_builds_failure(self):
+        result = TransferResultBuilder().add_failed({"path": "bad.mp4"}).build()
+
+        self.assertFalse(result.success)
+        self.assertFalse(result.partial)
+        self.assertEqual([{"path": "bad.mp4"}], result.failed_files)
+
+    def test_builder_empty_error_builds_failure(self):
+        result = TransferResultBuilder().set_error("").build()
+
+        self.assertFalse(result.success)
+        self.assertFalse(result.partial)
+        self.assertEqual("", result.error_details)
 
 
 if __name__ == "__main__":

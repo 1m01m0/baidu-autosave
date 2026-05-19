@@ -98,24 +98,15 @@ class TransferResult:
 
     @classmethod
     def from_dict(cls, data):
-        required_keys = (
-            "success",
-            "partial",
-            "message",
-            "transferred_files",
-            "transfer_failed_files",
-            "skipped_count",
-        )
-        for key in required_keys:
-            if key not in data:
-                raise KeyError(key)
+        if "success" not in data:
+            raise KeyError("success")
         return cls(
             success=data["success"],
-            partial=data["partial"],
-            message=data["message"],
-            transferred_files=list(data["transferred_files"]),
-            failed_files=list(data["transfer_failed_files"]),
-            skipped_count=data["skipped_count"],
+            partial=data.get("partial", False),
+            message=data.get("message", data.get("error", "")),
+            transferred_files=list(data.get("transferred_files", [])),
+            failed_files=list(data.get("transfer_failed_files", [])),
+            skipped_count=data.get("skipped_count", 0),
             error_details=data.get("error"),
         )
 
@@ -154,7 +145,11 @@ class TransferResultBuilder:
         return self
 
     def build(self):
-        success = not self._partial and not self._error_details and not self._failed_files
+        success = (
+            not self._partial
+            and self._error_details is None
+            and not self._failed_files
+        )
         return TransferResult(
             success=success,
             partial=self._partial,
