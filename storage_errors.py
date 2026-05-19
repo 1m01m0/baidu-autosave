@@ -61,16 +61,21 @@ def _is_storage_temporary_message(raw_message: str, lowered: str) -> bool:
 
 
 def _match_error_code(text: str) -> Optional[str]:
-    patterns = (
+    for pattern in _ERROR_CODE_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            return match.group(1)
+    return None
+
+
+_ERROR_CODE_PATTERNS = tuple(
+    re.compile(p)
+    for p in (
         r"error_code:\s*(-?\d+)",
         r"['\"]errno['\"]\s*[:=]\s*(-?\d+)",
         r"['\"]error_code['\"]\s*[:=]\s*(-?\d+)",
     )
-    for pattern in patterns:
-        match = re.search(pattern, text)
-        if match:
-            return match.group(1)
-    return None
+)
 
 
 def _contains_cookie_marker(text: str) -> bool:

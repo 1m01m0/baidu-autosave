@@ -76,9 +76,10 @@ class BaiduClientAdapter:
             MAX_RETRIES_GITHUB if self.is_github_actions else MAX_RETRIES_LOCAL
         )
         # 会话并发增强相关状态：在 _apply_session_patches 中填充。
-        self._session_cookie_lock: Optional[threading.Lock] = None
+        self._session_cookie_lock: Optional[threading.RLock] = None
         self._session_pool_info = self._new_session_pool_info()
         self._session_patches_applied = False
+        self._debug_pool_enabled: Optional[bool] = None
         self._init_client(cookies)
 
     @property
@@ -245,8 +246,9 @@ class BaiduClientAdapter:
         return True
 
     def _patch_cookies_update(self, pcs_candidate) -> bool:
-        """用 threading.Lock 包裹 pcs_candidate._cookies_update，
+        """用 threading.RLock 包裹 pcs_candidate._cookies_update，
         让"`_session.cookies.update` + `_cookies.update`"对外呈现原子语义。
+        使用 RLock 而非 Lock 以避免同一线程递归调用时死锁。
 
         语义见 Requirement 2 / 9.2。失败时还原原方法、不抛异常。
         """
@@ -256,7 +258,7 @@ class BaiduClientAdapter:
             logger.debug("pcs_candidate 未暴露 _cookies_update，跳过 cookie 原子化")
             return False
 
-        lock = threading.Lock()
+        lock = threading.RLock()
 
         def patched(cookies, *args, **kwargs):
             with lock:
@@ -376,7 +378,12 @@ class BaiduClientAdapter:
         """
         if not getattr(self, "_session_patches_applied", False):
             return
-        if read_positive_int_env("TRANSFERSHARE_PCS_DEBUG_POOL", 0) < 1:
+        # 缓存 debug 开关判断，避免每次都读环境变量
+        debug_enabled = self._debug_pool_enabled
+        if debug_enabled is None:
+            debug_enabled = read_positive_int_env("TRANSFERSHARE_PCS_DEBUG_POOL", 0) >= 1
+            self._debug_pool_enabled = debug_enabled
+        if not debug_enabled:
             return
         try:
             pcs_candidate = self._get_pcs_candidate()

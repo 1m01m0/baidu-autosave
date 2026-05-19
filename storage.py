@@ -8,6 +8,7 @@ import posixpath
 import queue
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # 添加 WeChatNotifier 和工具方法导入
 from wechat_notifier import WeChatNotifier
@@ -316,7 +317,6 @@ class BaiduStorage:
         else:
             # 并发路径：worker 各自调用 _run_one_share_config_safely。
             # 结果按原索引占位合并，保证 results 顺序与串行实现一致。
-            from concurrent.futures import ThreadPoolExecutor
 
             results = [None] * total_count
             with ThreadPoolExecutor(
@@ -336,7 +336,7 @@ class BaiduStorage:
                         progress_callback,
                     )
                     future_index[future] = index - 1
-                for future in future_index:
+                for future in as_completed(future_index):
                     slot = future_index[future]
                     results[slot] = future.result()
 
@@ -804,7 +804,7 @@ class BaiduStorage:
                 for path in duplicate_paths:
                     logger.info(f"    {path}")
         else:
-            logger.info("没有发现重复文件名。")
+            logger.debug("没有发现重复文件名。")
 
         return {
             self.path_service.normalize_path(file_info["relative_path"]): file_info["md5"]
@@ -1555,7 +1555,6 @@ class BaiduStorage:
 
         # 并发路径：用 ThreadPoolExecutor，rename 内部已走 call_with_retry，
         # 限频时自动退避。这里只关心结果汇总，不再额外加 sleep。
-        from concurrent.futures import ThreadPoolExecutor, as_completed
 
         with ThreadPoolExecutor(
             max_workers=concurrency, thread_name_prefix="transfershare-rename"
@@ -1630,19 +1629,27 @@ class BaiduStorage:
         transfer_failed_files = transfer_failed_files or []
         transfer_failed_count = len(transfer_failed_files)
 
+        # 统一基础结构，所有分支都包含完整 key 集合，调用方无需 .get() 防御
+        base = {
+            "success": False,
+            "partial": False,
+            "message": "",
+            "error": "",
+            "transferred_files": renamed_files,
+            "transfer_failed_files": transfer_failed_files,
+            "transfer_failed_count": transfer_failed_count,
+            "rename_failed_files": rename_failed_files,
+            "rename_failed_count": rename_failed_count,
+            "completed_count": completed_count,
+            "transfer_success_count": transfer_success_count,
+        }
+
         if completed_count == total_files and transfer_failed_count == 0:
             message = f"成功转存 {completed_count}/{total_files} 个文件"
             if progress_callback:
                 progress_callback("success", f"转存完成，{message}")
-            return {
-                "success": True,
-                "partial": False,
-                "message": message,
-                "transferred_files": renamed_files,
-                "completed_count": completed_count,
-                "transfer_success_count": transfer_success_count,
-                "rename_failed_count": rename_failed_count,
-            }
+            base.update({"success": True, "message": message})
+            return base
 
         if completed_count > 0 or transfer_success_count > 0:
             message = f"部分转存成功，成功完成 {completed_count}/{total_files} 个文件"
@@ -1655,19 +1662,8 @@ class BaiduStorage:
                 message = f"{message}，" + "，".join(failed_parts)
             if progress_callback:
                 progress_callback("warning", message)
-            return {
-                "success": False,
-                "partial": True,
-                "message": message,
-                "error": message,
-                "transferred_files": renamed_files,
-                "transfer_failed_files": transfer_failed_files,
-                "transfer_failed_count": transfer_failed_count,
-                "rename_failed_files": rename_failed_files,
-                "rename_failed_count": rename_failed_count,
-                "completed_count": completed_count,
-                "transfer_success_count": transfer_success_count,
-            }
+            base.update({"partial": True, "message": message, "error": message})
+            return base
 
         error = "转存失败，没有文件成功转存"
         if transfer_failed_count > 0:
@@ -1679,17 +1675,8 @@ class BaiduStorage:
             None,
             collect=True,
         )
-        return {
-            "success": False,
-            "partial": False,
-            "error": error,
-            "transfer_failed_files": transfer_failed_files,
-            "transfer_failed_count": transfer_failed_count,
-            "rename_failed_files": rename_failed_files,
-            "rename_failed_count": rename_failed_count,
-            "completed_count": completed_count,
-            "transfer_success_count": transfer_success_count,
-        }
+        base.update({"error": error})
+        return base
 
     @staticmethod
     def _can_try_dir_fast_path(
@@ -2235,8 +2222,6 @@ class BaiduStorage:
         transfer_executor = None
         pending_transfer = {"future": None, "items": None}
         if TRANSFER_PIPELINE_ENABLED:
-            from concurrent.futures import ThreadPoolExecutor
-
             transfer_executor = ThreadPoolExecutor(
                 max_workers=1, thread_name_prefix="transfershare-transfer"
             )
@@ -2540,7 +2525,7 @@ class BaiduStorage:
                 error_msg = "客户端未初始化或初始化失败"
                 handle_error_and_notify(
                     ValueError(error_msg),
-                    f"获取分享文件夹名称失败: 客户端不可用",
+                    "获取分享文件夹名称失败: 客户端不可用",
                     self.wechat_notifier,
                     None,
                     collect=True,

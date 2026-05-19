@@ -2,11 +2,18 @@
 # -*- coding: utf-8 -*-
 
 import re
+from functools import lru_cache
 
 
 _WINDOWS_DRIVE_PATTERN = re.compile(r"^[A-Za-z]:")
 REGEX_FILTER_UNMATCHED = "unmatched"
 REGEX_FILTER_UNSAFE_REPLACE = "unsafe_replace"
+
+
+@lru_cache(maxsize=64)
+def _compiled_re(pattern: str):
+    """编译并缓存正则表达式，避免热路径重复编译。"""
+    return re.compile(pattern)
 
 
 def is_safe_relative_target_path(path):
@@ -29,12 +36,13 @@ def apply_regex_rules_detail(file_path, regex_pattern=None, regex_replace=None):
         return True, file_path, None
 
     try:
-        match = re.search(regex_pattern, file_path)
+        compiled = _compiled_re(regex_pattern)
+        match = compiled.search(file_path)
         if not match:
             return False, file_path, REGEX_FILTER_UNMATCHED
 
         if regex_replace and regex_replace.strip():
-            new_path = re.sub(regex_pattern, regex_replace, file_path)
+            new_path = compiled.sub(regex_replace, file_path)
             if new_path != file_path:
                 if not is_safe_relative_target_path(new_path):
                     return False, file_path, REGEX_FILTER_UNSAFE_REPLACE
@@ -56,9 +64,9 @@ def apply_regex_rules(file_path, regex_pattern=None, regex_replace=None):
 
 def _matches_folder_filter(folder_name, folder_filter):
     if isinstance(folder_filter, list):
-        return any(re.search(pattern, folder_name) for pattern in folder_filter)
+        return any(_compiled_re(pattern).search(folder_name) for pattern in folder_filter)
     if isinstance(folder_filter, str):
-        return bool(re.search(folder_filter, folder_name))
+        return bool(_compiled_re(folder_filter).search(folder_name))
     return None
 
 

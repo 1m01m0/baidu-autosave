@@ -530,81 +530,29 @@ def check_network_connectivity():
     """
     if os.getenv("TRANSFERSHARE_NETWORK_PROBE", "0") != "1":
         return
+    if os.getenv("GITHUB_ACTIONS") != "true":
+        return
 
-    try:
-        import requests
+    import requests
 
+    logger = get_logger()
+    logger.info("检测到GitHub Actions环境，正在检查网络连通性...")
+
+    targets = [
+        ("https://www.baidu.com", "百度主站"),
+        ("https://pan.baidu.com", "百度网盘"),
+    ]
+    for url, name in targets:
         try:
-            logger = get_logger()
-        except Exception:
-            logger = None
-
-        if os.getenv("GITHUB_ACTIONS") == "true":
-            msg = "检测到GitHub Actions环境，正在检查网络连通性..."
-            if logger:
-                logger.info(msg)
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                logger.info(f"✅ {name}连通正常")
             else:
-                print(msg)
-
-            try:
-                response = requests.get("https://www.baidu.com", timeout=10)
-                if response.status_code == 200:
-                    msg = "✅ 百度主站连通正常"
-                    if logger:
-                        logger.info(msg)
-                    else:
-                        print(msg)
-                else:
-                    msg = f"⚠️ 百度主站连通异常: HTTP {response.status_code}"
-                    if logger:
-                        logger.warning(msg)
-                    else:
-                        print(msg)
-            except Exception as e:
-                msg = f"❌ 百度主站连通失败: {str(e)}"
-                if logger:
-                    logger.error(msg)
-                else:
-                    print(msg)
-
-            try:
-                response = requests.get("https://pan.baidu.com", timeout=10)
-                if response.status_code == 200:
-                    msg = "✅ 百度网盘连通正常"
-                    if logger:
-                        logger.info(msg)
-                    else:
-                        print(msg)
-                else:
-                    msg = f"⚠️ 百度网盘连通异常: HTTP {response.status_code}"
-                    if logger:
-                        logger.warning(msg)
-                    else:
-                        print(msg)
-            except Exception as e:
-                msg = f"❌ 百度网盘连通失败: {str(e)}"
-                if logger:
-                    logger.error(msg)
-                else:
-                    print(msg)
-                msg2 = "提示: GitHub Actions环境可能存在网络访问限制"
-                if logger:
-                    logger.info(msg2)
-                else:
-                    print(msg2)
-
-    except ImportError:
-        try:
-            logger = get_logger()
-            logger.debug("网络检查跳过: requests库不可用")
-        except Exception:
-            print("网络检查跳过: requests库不可用")
-    except Exception as e:
-        try:
-            logger = get_logger()
-            logger.error(f"网络检查异常: {str(e)}")
-        except Exception:
-            print(f"网络检查异常: {str(e)}")
+                logger.warning(f"⚠️ {name}连通异常: HTTP {response.status_code}")
+        except Exception as e:
+            logger.error(f"❌ {name}连通失败: {e}")
+            if name == "百度网盘":
+                logger.info("提示: GitHub Actions环境可能存在网络访问限制")
 
 
 def progress_callback(level, message):

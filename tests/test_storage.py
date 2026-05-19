@@ -2991,7 +2991,9 @@ class BaiduStorageFlowTests(unittest.TestCase):
             {
                 "success": False,
                 "partial": False,
+                "message": "",
                 "error": "转存失败，没有文件成功转存",
+                "transferred_files": [],
                 "transfer_failed_files": [],
                 "transfer_failed_count": 0,
                 "rename_failed_files": [],
