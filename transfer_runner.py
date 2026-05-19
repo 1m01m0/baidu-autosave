@@ -26,7 +26,6 @@ from config_utils import (
     build_retry_share_config,
     load_runtime_config,
     retry_share_config_key,
-    validate_runtime_config,
 )
 
 
@@ -555,6 +554,154 @@ def check_network_connectivity():
                 logger.info("提示: GitHub Actions环境可能存在网络访问限制")
 
 
+def load_config_and_log(logger):
+    config = load_runtime_config()
+    if config.get("config_source") == "file":
+        logger.info(f"检测到本地配置文件: {config['config_path']}，优先使用本地配置")
+    elif config.get("config_load_warning"):
+        logger.warning(
+            f"读取本地配置文件失败，回退到环境变量: {config['config_load_warning']}"
+        )
+
+    log_config_loaded(config)
+    for warning in config.get("config_validation_warnings", []):
+        logger.warning(warning)
+    logger.info(f"  企业微信通知: {'已配置' if config['wechat_webhook'] else '未配置'}")
+    return config
+
+
+def init_notifier(config, logger):
+    if not config["wechat_webhook"]:
+        return None
+    notifier = WeChatNotifier(config["wechat_webhook"])
+    logger.info("企业微信通知器初始化成功")
+    return notifier
+
+
+def init_storage(config, logger):
+    logger.info("初始化百度网盘客户端...")
+    storage = BaiduStorage(config["cookies"], config["wechat_webhook"])
+    if not storage.is_valid():
+        raise Exception("百度网盘客户端初始化失败，请检查cookies是否有效")
+
+    quota_info = storage.get_quota_info()
+    if quota_info:
+        logger.info(f"网盘空间: {quota_info['used_gb']}GB / {quota_info['total_gb']}GB")
+    return storage
+
+
+def persist_failed_records_safely(
+    logger, failed_records_load_error, failed_records, all_failed_records
+):
+    if failed_records_load_error:
+        if all_failed_records:
+            logger.warning("因历史失败清单读取失败，跳过更新失败清单以避免覆盖原文件")
+        return
+
+    save_failed_transfer_records(all_failed_records)
+    if all_failed_records:
+        logger.warning(f"失败清单已保存: {FAILED_TRANSFERS_FILE}")
+    elif failed_records:
+        logger.info("失败清单已清理")
+
+
+def execute_transfer_workflow(storage, logger, config):
+    failed_records_load_error = False
+    try:
+        failed_records = load_failed_transfer_records()
+    except Exception as exc:
+        failed_records = []
+        failed_records_load_error = True
+        logger.warning(f"读取历史失败清单失败，保留原文件不覆盖: {exc}")
+
+    remaining_failed_records = retry_history_failed_records(storage, logger, failed_records)
+    result = run_current_transfer(storage, logger, config, failed_records)
+    new_failed_records = build_failed_transfer_records(
+        result, failed_records, increment_attempts=True
+    )
+    (
+        new_retryable_records,
+        new_deferred_records,
+        new_permanent_records,
+        new_exhausted_records,
+    ) = split_failed_transfer_records_by_status(new_failed_records)
+    log_permanent_failed_records(logger, new_permanent_records, "本次失败清单")
+    log_exhausted_failed_records(logger, new_exhausted_records, "本次失败清单")
+    if remaining_failed_records:
+        result = attach_failed_records_to_result(result, remaining_failed_records)
+    all_failed_records = merge_failed_transfer_records(
+        remaining_failed_records, new_retryable_records, new_deferred_records
+    )
+    persist_failed_records_safely(
+        logger, failed_records_load_error, failed_records, all_failed_records
+    )
+    return result
+
+
+def log_successful_transfer_result(logger, result):
+    if result.get("skipped"):
+        logger.info(f"✅ 任务完成: {result.get('message', result.get('summary', '转存完成'))}")
+        return
+
+    if "results" in result:
+        summary = mask_sensitive(result["summary"]) or result["summary"]
+        logger.info(f"🎉 批量转存成功: {summary}")
+    else:
+        success_message = result.get("message", result.get("summary", "转存成功"))
+        safe_success_message = mask_sensitive(success_message) or success_message
+        logger.info(f"🎉 转存成功: {safe_success_message}")
+
+    transferred_files = collect_transferred_files(result)
+    if transferred_files:
+        logger.info(f"转存文件列表 ({len(transferred_files)}个):")
+        for index, file in enumerate(transferred_files[:10], 1):
+            detail = f"  {index}. {file}"
+            logger.info(mask_sensitive(detail) or detail)
+        if len(transferred_files) > 10:
+            logger.info(f"  ... 还有 {len(transferred_files) - 10} 个文件")
+
+
+def log_partial_transfer_result(logger, result):
+    error_msg = result.get("error", result.get("summary", "部分转存成功"))
+    safe_error_msg = mask_sensitive(error_msg) or error_msg
+    logger.warning(f"⚠️ 转存部分成功（按失败处理，退出码 1）: {safe_error_msg}")
+    log_transfer_failed_files(logger, result.get("transfer_failed_files", []))
+    rename_failed_files = result.get("rename_failed_files", [])
+    if not rename_failed_files:
+        return
+
+    logger.warning(f"重命名失败文件 ({len(rename_failed_files)}个):")
+    for index, item in enumerate(rename_failed_files[:10], 1):
+        detail = (
+            f"  {index}. {item.get('source_path')} -> "
+            f"{item.get('target_path')}: {item.get('error')}"
+        )
+        logger.warning(mask_sensitive(detail) or detail)
+    if len(rename_failed_files) > 10:
+        logger.warning(f"  ... 还有 {len(rename_failed_files) - 10} 个文件")
+
+
+def log_transfer_result(logger, result):
+    if result["success"]:
+        log_successful_transfer_result(logger, result)
+    elif result.get("partial"):
+        log_partial_transfer_result(logger, result)
+    else:
+        error_msg = result.get("error", result.get("summary", "未知错误"))
+        safe_error_msg = mask_sensitive(error_msg) or error_msg
+        logger.error(f"❌ 转存失败: {safe_error_msg}")
+        log_transfer_failed_files(logger, result.get("transfer_failed_files", []))
+
+
+def notify_transfer_result(notifier, result, config, logger):
+    if not notifier:
+        return
+    logger.info("发送企业微信通知...")
+    notification_sent = notifier.send_transfer_result(result, config)
+    if not notification_sent:
+        logger.warning("企业微信通知发送失败")
+
+
 def progress_callback(level, message):
     """进度回调函数 - 实时输出进度信息"""
     safe_message = mask_sensitive(message) or message
@@ -574,135 +721,12 @@ def main():
     run_success = False
 
     try:
-        config = load_runtime_config()
-        validation = validate_runtime_config(config)
-        if validation["errors"]:
-            raise ValueError("配置校验失败: " + "; ".join(validation["errors"]))
-        validated_config = validation["config"]
-        if validated_config is not config:
-            config.clear()
-            config.update(validated_config)
-        for warning in validation["warnings"]:
-            logger.warning(warning)
-
-        if config.get("config_source") == "file":
-            logger.info(f"检测到本地配置文件: {config['config_path']}，优先使用本地配置")
-        elif config.get("config_load_warning"):
-            logger.warning(
-                f"读取本地配置文件失败，回退到环境变量: {config['config_load_warning']}"
-            )
-
-        log_config_loaded(config)
-        logger.info(
-            f"  企业微信通知: {'已配置' if config['wechat_webhook'] else '未配置'}"
-        )
-
-        if config["wechat_webhook"]:
-            notifier = WeChatNotifier(config["wechat_webhook"])
-            logger.info("企业微信通知器初始化成功")
-
-        logger.info("初始化百度网盘客户端...")
-        storage = BaiduStorage(config["cookies"], config["wechat_webhook"])
-
-        if not storage.is_valid():
-            raise Exception("百度网盘客户端初始化失败，请检查cookies是否有效")
-
-        quota_info = storage.get_quota_info()
-        if quota_info:
-            logger.info(
-                f"网盘空间: {quota_info['used_gb']}GB / {quota_info['total_gb']}GB"
-            )
-
-        failed_records_load_error = False
-        try:
-            failed_records = load_failed_transfer_records()
-        except Exception as exc:
-            failed_records = []
-            failed_records_load_error = True
-            logger.warning(f"读取历史失败清单失败，保留原文件不覆盖: {exc}")
-        remaining_failed_records = retry_history_failed_records(
-            storage, logger, failed_records
-        )
-        result = run_current_transfer(storage, logger, config, failed_records)
-        new_failed_records = build_failed_transfer_records(
-            result, failed_records, increment_attempts=True
-        )
-        (
-            new_retryable_records,
-            new_deferred_records,
-            new_permanent_records,
-            new_exhausted_records,
-        ) = split_failed_transfer_records_by_status(new_failed_records)
-        log_permanent_failed_records(logger, new_permanent_records, "本次失败清单")
-        log_exhausted_failed_records(logger, new_exhausted_records, "本次失败清单")
-        if remaining_failed_records:
-            result = attach_failed_records_to_result(result, remaining_failed_records)
-        all_failed_records = merge_failed_transfer_records(
-            remaining_failed_records, new_retryable_records, new_deferred_records
-        )
-        if failed_records_load_error:
-            if all_failed_records:
-                logger.warning("因历史失败清单读取失败，跳过更新失败清单以避免覆盖原文件")
-        else:
-            save_failed_transfer_records(all_failed_records)
-            if all_failed_records:
-                logger.warning(f"失败清单已保存: {FAILED_TRANSFERS_FILE}")
-            elif failed_records:
-                logger.info("失败清单已清理")
-
-        if result["success"]:
-            if result.get("skipped"):
-                logger.info(
-                    f"✅ 任务完成: {result.get('message', result.get('summary', '转存完成'))}"
-                )
-            else:
-                if "results" in result:
-                    summary = mask_sensitive(result["summary"]) or result["summary"]
-                    logger.info(f"🎉 批量转存成功: {summary}")
-                else:
-                    success_message = result.get('message', result.get('summary', '转存成功'))
-                    safe_success_message = mask_sensitive(success_message) or success_message
-                    logger.info(f"🎉 转存成功: {safe_success_message}")
-
-                transferred_files = collect_transferred_files(result)
-                if transferred_files:
-                    logger.info(f"转存文件列表 ({len(transferred_files)}个):")
-                    for index, file in enumerate(transferred_files[:10], 1):
-                        detail = f"  {index}. {file}"
-                        logger.info(mask_sensitive(detail) or detail)
-                    if len(transferred_files) > 10:
-                        logger.info(
-                            f"  ... 还有 {len(transferred_files) - 10} 个文件"
-                        )
-        elif result.get("partial"):
-            error_msg = result.get("error", result.get("summary", "部分转存成功"))
-            safe_error_msg = mask_sensitive(error_msg) or error_msg
-            logger.warning(f"⚠️ 转存部分成功（按失败处理，退出码 1）: {safe_error_msg}")
-            log_transfer_failed_files(logger, result.get("transfer_failed_files", []))
-            rename_failed_files = result.get("rename_failed_files", [])
-            if rename_failed_files:
-                logger.warning(f"重命名失败文件 ({len(rename_failed_files)}个):")
-                for index, item in enumerate(rename_failed_files[:10], 1):
-                    detail = (
-                        f"  {index}. {item.get('source_path')} -> "
-                        f"{item.get('target_path')}: {item.get('error')}"
-                    )
-                    logger.warning(mask_sensitive(detail) or detail)
-                if len(rename_failed_files) > 10:
-                    logger.warning(
-                        f"  ... 还有 {len(rename_failed_files) - 10} 个文件"
-                    )
-        else:
-            error_msg = result.get("error", result.get("summary", "未知错误"))
-            safe_error_msg = mask_sensitive(error_msg) or error_msg
-            logger.error(f"❌ 转存失败: {safe_error_msg}")
-            log_transfer_failed_files(logger, result.get("transfer_failed_files", []))
-
-        if notifier:
-            logger.info("发送企业微信通知...")
-            notification_sent = notifier.send_transfer_result(result, config)
-            if not notification_sent:
-                logger.warning("企业微信通知发送失败")
+        config = load_config_and_log(logger)
+        notifier = init_notifier(config, logger)
+        storage = init_storage(config, logger)
+        result = execute_transfer_workflow(storage, logger, config)
+        log_transfer_result(logger, result)
+        notify_transfer_result(notifier, result, config, logger)
 
         if not result["success"]:
             sys.exit(1)

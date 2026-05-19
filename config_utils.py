@@ -371,6 +371,7 @@ def load_runtime_config(config_path: Union[Path, str] = "config.json") -> Dict[s
         raise ValueError("配置校验失败: " + "; ".join(validation["errors"]))
 
     config = validation["config"]
+    config["config_validation_warnings"] = validation["warnings"]
     config["config_path"] = str(path)
     return config
 

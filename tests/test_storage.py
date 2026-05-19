@@ -1119,7 +1119,7 @@ class BaiduStorageFlowTests(unittest.TestCase):
     def test_rename_transferred_files_rejects_unsafe_target_path(self):
         item = TransferItem(1, "/save", "clean.txt", "../evil.txt", True, "md5")
 
-        with patch("storage.handle_error_and_notify") as notify:
+        with patch("storage_rename.handle_error_and_notify") as notify:
             result = self.storage._rename_transferred_files([item], "/save")
 
         self.assertEqual([], result["transferred_files"])
@@ -1286,7 +1286,7 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.storage.path_service.ensure_dir_exists.return_value = True
         self.storage.client.transfer_shared_paths.side_effect = transfer_side_effect
 
-        with patch("storage.TRANSFER_BATCH_SIZE", 2):
+        with patch("storage_streaming.TRANSFER_BATCH_SIZE", 2):
             result = self.storage.transfer_share("https://pan.baidu.com/s/abc")
 
         self.assertTrue(result["success"])
@@ -1312,7 +1312,7 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.storage._scan_local_files_dict = Mock(return_value={})
         self.storage.path_service.ensure_dir_exists.return_value = True
 
-        with patch("storage.TRANSFER_BATCH_SIZE", 2):
+        with patch("storage_streaming.TRANSFER_BATCH_SIZE", 2):
             result = self.storage.transfer_share(
                 "https://pan.baidu.com/s/abc",
                 regex_pattern=r"\.mp4$",
@@ -1345,7 +1345,7 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.storage._scan_local_files_dict = Mock(return_value={})
         self.storage.path_service.ensure_dir_exists.return_value = True
 
-        with patch("storage.TRANSFER_BATCH_SIZE", 1):
+        with patch("storage_streaming.TRANSFER_BATCH_SIZE", 1):
             result = self.storage.transfer_share("https://pan.baidu.com/s/abc")
 
         self.assertTrue(result["success"])
@@ -1412,7 +1412,7 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.storage._scan_local_files_dict = Mock(return_value={})
         self.storage.path_service.ensure_dir_exists.return_value = True
 
-        with patch("storage.TRANSFER_BATCH_SIZE", 1):
+        with patch("storage_streaming.TRANSFER_BATCH_SIZE", 1):
             result = self.storage.transfer_share("https://pan.baidu.com/s/abc")
 
         self.assertFalse(result["success"])
@@ -1446,9 +1446,9 @@ class BaiduStorageFlowTests(unittest.TestCase):
 
         self.storage.share_service.iter_shared_files.return_value = []
 
-        with patch("storage.threading.Thread", FakeThread), patch(
-            "storage.get_logger", return_value=fake_logger
-        ), patch("storage.STREAM_PRODUCER_JOIN_TIMEOUT", 0.01):
+        with patch("storage_streaming.threading.Thread", FakeThread), patch(
+            "storage_streaming.get_logger", return_value=fake_logger
+        ), patch("storage_streaming.STREAM_PRODUCER_JOIN_TIMEOUT", 0.01):
             result = self.storage._transfer_share_streaming(
                 context,
                 "https://pan.baidu.com/s/abc",
@@ -2513,7 +2513,7 @@ class BaiduStorageFlowTests(unittest.TestCase):
         ]
         self.storage._clear_local_files_cache = Mock()
 
-        with patch("storage.time.sleep"):
+        with patch("storage_transfer_plan.time.sleep"):
             success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
                 transfer_list, "url", 1, 2, "token", "/save"
             )
@@ -2534,7 +2534,7 @@ class BaiduStorageFlowTests(unittest.TestCase):
             (2, "/save/b", "b/2.txt", "b/2.txt", False),
         ]
 
-        with patch("storage.time.sleep") as sleep:
+        with patch("storage_transfer_plan.time.sleep") as sleep:
             success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
                 transfer_list, "url", 1, 2, "token", "/save"
             )
@@ -2551,7 +2551,7 @@ class BaiduStorageFlowTests(unittest.TestCase):
         ]
         transfer_item = (1, "/save", "a.txt", "a.txt", False)
 
-        with patch("storage.time.sleep") as sleep:
+        with patch("storage_transfer_plan.time.sleep") as sleep:
             success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
                 [transfer_item], "url", 1, 2, "token", "/save"
             )
@@ -2567,7 +2567,7 @@ class BaiduStorageFlowTests(unittest.TestCase):
             for fs_id in range(TRANSFER_BATCH_SIZE * 2 + 1)
         ]
 
-        with patch("storage.time.sleep"):
+        with patch("storage_transfer_plan.time.sleep"):
             success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
                 transfer_list, "url", 1, 2, "token", "/save"
             )
@@ -2594,9 +2594,9 @@ class BaiduStorageFlowTests(unittest.TestCase):
             None,
         ]
 
-        with patch("storage.TRANSFER_BATCH_SIZE", 999), patch("storage.time.sleep"), patch(
-            "storage.handle_error_and_notify"
-        ) as notify:
+        with patch("storage_transfer_plan.TRANSFER_BATCH_SIZE", 999), patch(
+            "storage_transfer_plan.time.sleep"
+        ), patch("storage_transfer_plan.handle_error_and_notify") as notify:
             success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
                 transfer_list, "url", 1, 2, "token", "/save"
             )
@@ -2633,9 +2633,11 @@ class BaiduStorageFlowTests(unittest.TestCase):
 
         self.storage.client.transfer_shared_paths.side_effect = transfer_side_effect
 
-        with patch("storage.TRANSFER_BATCH_SIZE", 3), patch(
-            "storage.TRANSFER_FAILED_RETRY_ATTEMPTS", 1
-        ), patch("storage.time.sleep"), patch("storage.handle_error_and_notify") as notify:
+        with patch("storage_transfer_plan.TRANSFER_BATCH_SIZE", 3), patch(
+            "storage_transfer_plan.TRANSFER_FAILED_RETRY_ATTEMPTS", 1
+        ), patch("storage_transfer_plan.time.sleep"), patch(
+            "storage_transfer_plan.handle_error_and_notify"
+        ) as notify:
             success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
                 transfer_list, "url", 1, 2, "token", "/save"
             )
@@ -2660,9 +2662,9 @@ class BaiduStorageFlowTests(unittest.TestCase):
             return_value=([], [transfer_item])
         )
 
-        with patch("storage.TRANSFER_FAILED_RETRY_ATTEMPTS", 5), patch(
-            "storage.time.sleep"
-        ) as sleep, patch("storage.handle_error_and_notify") as notify:
+        with patch("storage_transfer_plan.TRANSFER_FAILED_RETRY_ATTEMPTS", 5), patch(
+            "storage_transfer_plan.time.sleep"
+        ) as sleep, patch("storage_transfer_plan.handle_error_and_notify") as notify:
             success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
                 [transfer_item], "url", 1, 2, "token", "/save"
             )
@@ -2695,9 +2697,11 @@ class BaiduStorageFlowTests(unittest.TestCase):
             return_value=([], [transfer_list[0]])
         )
 
-        with patch("storage.TRANSFER_BATCH_SIZE", 1), patch(
-            "storage.TRANSFER_FAILED_RETRY_ATTEMPTS", 5
-        ), patch("storage.time.sleep") as sleep, patch("storage.handle_error_and_notify"):
+        with patch("storage_transfer_plan.TRANSFER_BATCH_SIZE", 1), patch(
+            "storage_transfer_plan.TRANSFER_FAILED_RETRY_ATTEMPTS", 5
+        ), patch("storage_transfer_plan.time.sleep") as sleep, patch(
+            "storage_transfer_plan.handle_error_and_notify"
+        ):
             success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
                 transfer_list, "url", 1, 2, "token", "/save"
             )
@@ -2723,7 +2727,7 @@ class BaiduStorageFlowTests(unittest.TestCase):
             return_value=([], [transfer_list[1]])
         )
 
-        with patch("storage.time.sleep"):
+        with patch("storage_transfer_plan.time.sleep"):
             success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
                 transfer_list, "url", 1, 2, "token", "/save"
             )
@@ -2746,9 +2750,9 @@ class BaiduStorageFlowTests(unittest.TestCase):
             return_value=([], [transfer_item])
         )
 
-        with patch("storage.TRANSFER_FAILED_RETRY_ATTEMPTS", 1), patch(
-            "storage.time.sleep"
-        ) as sleep, patch("storage.handle_error_and_notify") as notify:
+        with patch("storage_transfer_plan.TRANSFER_FAILED_RETRY_ATTEMPTS", 1), patch(
+            "storage_transfer_plan.time.sleep"
+        ) as sleep, patch("storage_transfer_plan.handle_error_and_notify") as notify:
             success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
                 [transfer_item], "url", 1, 2, "token", "/save"
             )
@@ -2780,7 +2784,9 @@ class BaiduStorageFlowTests(unittest.TestCase):
             side_effect=[([], [transfer_item]), ([completed_item], [])]
         )
 
-        with patch("storage.TRANSFER_FAILED_RETRY_ATTEMPTS", 1), patch("storage.time.sleep"):
+        with patch("storage_transfer_plan.TRANSFER_FAILED_RETRY_ATTEMPTS", 1), patch(
+            "storage_transfer_plan.time.sleep"
+        ):
             success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
                 [transfer_item], "url", 1, 2, "token", "/save"
             )
@@ -2862,9 +2868,9 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.storage._clear_local_files_cache = Mock()
         self.storage._scan_local_files_dict = Mock(side_effect=[{}, {"a.txt": "md5-a"}])
 
-        with patch("storage.TRANSFER_FAILED_RETRY_ATTEMPTS", 1), patch("storage.time.sleep"), patch(
-            "storage.handle_error_and_notify"
-        ):
+        with patch("storage_transfer_plan.TRANSFER_FAILED_RETRY_ATTEMPTS", 1), patch(
+            "storage_transfer_plan.time.sleep"
+        ), patch("storage_transfer_plan.handle_error_and_notify"):
             success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
                 [transfer_item], "url", 1, 2, "token", "/save"
             )
@@ -2881,7 +2887,7 @@ class BaiduStorageFlowTests(unittest.TestCase):
             (2, "/save", "b.txt", "renamed-b.txt", True),
         ]
 
-        with patch("storage.time.sleep") as sleep:
+        with patch("storage_rename.time.sleep") as sleep:
             result = self.storage._rename_transferred_files(transfer_items, "/save")
 
         self.assertEqual(["renamed-a.txt", "renamed-b.txt"], result["transferred_files"])
@@ -2892,7 +2898,7 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.storage.path_service.ensure_dir_exists.return_value = True
         progress_callback = Mock()
 
-        with patch("storage.handle_error_and_notify"):
+        with patch("storage_rename.handle_error_and_notify"):
             result = self.storage._rename_transferred_files(
                 [(1, "/save/old", "old/a.txt", "new/a.txt", True)],
                 "/save",

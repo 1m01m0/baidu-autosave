@@ -65,15 +65,7 @@ class TransferRunnerSmokeTests(unittest.TestCase):
         fake_notifier.send_transfer_result.assert_called_once_with(result, config)
         mock_shutdown.assert_called_once_with(success=True)
 
-    def test_main_exits_when_loaded_config_fails_validation(self):
-        config = {
-            "config_source": "file",
-            "config_path": "config.json",
-            "cookies": "BDUSS=foo; STOKEN=bar",
-            "wechat_webhook": "",
-            "share_urls": "https://pan.baidu.com/s/abc12345",
-            "share_configs": [{"share_url": "https://pan.baidu.com/s/abc12345"}],
-        }
+    def test_main_exits_when_load_runtime_config_raises_validation_error(self):
         fake_logger = Mock()
 
         with patch.object(transfer_runner, "setup_logging"), patch.object(
@@ -81,11 +73,9 @@ class TransferRunnerSmokeTests(unittest.TestCase):
         ), patch.object(transfer_runner, "log_startup"), patch.object(
             transfer_runner, "check_network_connectivity"
         ), patch.object(
-            transfer_runner, "load_runtime_config", return_value=config
-        ), patch.object(
             transfer_runner,
-            "validate_runtime_config",
-            return_value={"config": config, "errors": ["bad config"], "warnings": [], "info": []},
+            "load_runtime_config",
+            side_effect=ValueError("配置校验失败: bad config"),
         ), patch.object(
             transfer_runner, "handle_error_and_notify"
         ) as mock_handle_error, patch.object(
