@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import unittest
+
+from storage_models import TransferResult, TransferResultBuilder
+
+
+class TransferResultTests(unittest.TestCase):
+    def test_defaults_and_to_dict_success_shape(self):
+        result = TransferResult(
+            success=True,
+            message="完成",
+            transferred_files=[{"path": "a.mp4"}],
+            skipped_count=2,
+        )
+
+        self.assertTrue(result.success)
+        self.assertFalse(result.partial)
+        self.assertEqual([], result.failed_files)
+        self.assertEqual(2, result.skipped_count)
+
+        self.assertEqual(
+            {
+                "success": True,
+                "partial": False,
+                "message": "完成",
+                "transferred_files": [{"path": "a.mp4"}],
+                "transfer_failed_files": [],
+                "transfer_failed_count": 0,
+                "rename_failed_files": [],
+                "rename_failed_count": 0,
+                "completed_count": 1,
+                "transfer_success_count": 1,
+                "skipped_count": 2,
+            },
+            result.to_dict(),
+        )
+
+    def test_success_with_failed_files_is_invalid(self):
+        with self.assertRaisesRegex(ValueError, "success=True"):
+            TransferResult(
+                success=True,
+                failed_files=[{"path": "failed.mp4"}],
+            )
+
+    def test_from_dict_reconstructs_result(self):
+        result = TransferResult.from_dict(
+            {
+                "success": False,
+                "partial": True,
+                "message": "部分成功",
+                "transferred_files": [{"path": "ok.mp4"}],
+                "transfer_failed_files": [{"path": "bad.mp4"}],
+                "transfer_failed_count": 1,
+                "rename_failed_files": [],
+                "rename_failed_count": 0,
+                "completed_count": 1,
+                "transfer_success_count": 1,
+                "skipped_count": 3,
+                "error": "部分成功",
+            }
+        )
+
+        self.assertFalse(result.success)
+        self.assertTrue(result.partial)
+        self.assertEqual("部分成功", result.message)
+        self.assertEqual([{"path": "ok.mp4"}], result.transferred_files)
+        self.assertEqual([{"path": "bad.mp4"}], result.failed_files)
+        self.assertEqual(3, result.skipped_count)
+        self.assertEqual("部分成功", result.error_details)
+
+    def test_from_dict_requires_compatible_keys(self):
+        with self.assertRaisesRegex(KeyError, "partial"):
+            TransferResult.from_dict({"success": True})
+
+
+class TransferResultBuilderTests(unittest.TestCase):
+    def test_builder_chain_builds_success_result(self):
+        builder = TransferResultBuilder()
+
+        self.assertIs(builder.set_message("完成"), builder)
+        self.assertIs(builder.add_transferred({"path": "a.mp4"}), builder)
+        self.assertIs(builder.set_skipped(1), builder)
+
+        result = builder.build()
+
+        self.assertTrue(result.success)
+        self.assertFalse(result.partial)
+        self.assertEqual("完成", result.message)
+        self.assertEqual([{"path": "a.mp4"}], result.transferred_files)
+        self.assertEqual([], result.failed_files)
+        self.assertEqual(1, result.skipped_count)
+        self.assertIsNone(result.error_details)
+
+    def test_builder_builds_failure_result(self):
+        result = (
+            TransferResultBuilder()
+            .set_message("失败")
+            .set_error("转存失败")
+            .build()
+        )
+
+        self.assertFalse(result.success)
+        self.assertFalse(result.partial)
+        self.assertEqual("失败", result.message)
+        self.assertEqual("转存失败", result.error_details)
+
+    def test_builder_builds_partial_result(self):
+        result = (
+            TransferResultBuilder()
+            .add_transferred({"path": "ok.mp4"})
+            .add_failed({"path": "bad.mp4"})
+            .set_partial(True)
+            .set_message("部分成功")
+            .build()
+        )
+
+        self.assertFalse(result.success)
+        self.assertTrue(result.partial)
+        self.assertEqual("部分成功", result.message)
+        self.assertEqual([{"path": "ok.mp4"}], result.transferred_files)
+        self.assertEqual([{"path": "bad.mp4"}], result.failed_files)
+
+
+if __name__ == "__main__":
+    unittest.main()
