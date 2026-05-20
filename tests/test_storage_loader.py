@@ -11,17 +11,24 @@ from utils import mask_share_url
 
 
 class ShareLoaderTest(unittest.TestCase):
-    def make_shared_path(self):
+    def make_shared_path(
+        self,
+        uk=1,
+        share_id=2,
+        bdstoken="token",
+        path="/share/movie.mp4",
+    ):
         return SimpleNamespace(
-            uk=1,
-            share_id=2,
-            bdstoken="token",
-            path="/share/movie.mp4",
+            uk=uk,
+            share_id=share_id,
+            bdstoken=bdstoken,
+            path=path,
             is_dir=False,
         )
 
     def make_loader(self, share_service=None, progress_messages=None, error_notifications=None):
-        share_service = share_service or Mock()
+        if share_service is None:
+            share_service = Mock(spec_set=["load_shared_paths", "list_shared_files"])
         progress_messages = progress_messages if progress_messages is not None else []
         error_notifications = error_notifications if error_notifications is not None else []
 
@@ -37,19 +44,30 @@ class ShareLoaderTest(unittest.TestCase):
         )
         return loader, share_service, progress_messages, error_notifications
 
-    def test_load_entries_returns_share_context(self):
-        shared_path = self.make_shared_path()
+    def test_load_entries_returns_context_with_first_share_metadata(self):
+        first_shared_path = self.make_shared_path(
+            uk=11,
+            share_id=22,
+            bdstoken="first-token",
+            path="/share/first.mp4",
+        )
+        second_shared_path = self.make_shared_path(
+            uk=99,
+            share_id=88,
+            bdstoken="second-token",
+            path="/share/second.mp4",
+        )
         loader, share_service, progress_messages, error_notifications = self.make_loader()
-        share_service.load_shared_paths.return_value = [shared_path]
+        share_service.load_shared_paths.return_value = [first_shared_path, second_shared_path]
 
         result = loader.load_entries("https://pan.baidu.com/s/abc12345?pwd=1a2B", "1a2B")
 
         self.assertEqual(
             {
-                "shared_paths": [shared_path],
-                "uk": 1,
-                "share_id": 2,
-                "bdstoken": "token",
+                "shared_paths": [first_shared_path, second_shared_path],
+                "uk": 11,
+                "share_id": 22,
+                "bdstoken": "first-token",
             },
             result,
         )
@@ -103,7 +121,7 @@ class ShareLoaderTest(unittest.TestCase):
         self.assertIn(("info", "【步骤1/4】访问分享链接: share-url"), progress_messages)
         self.assertEqual([], error_notifications)
 
-    def test_load_files_returns_copied_context_and_forwards_callback(self):
+    def test_load_files_returns_copied_context_and_forwards_usable_callback(self):
         shared_path = self.make_shared_path()
         context = {
             "shared_paths": [shared_path],
@@ -112,8 +130,30 @@ class ShareLoaderTest(unittest.TestCase):
             "bdstoken": "token",
         }
         shared_files_info = [{"fs_id": 10, "path": "movie.mp4"}]
-        loader, share_service, progress_messages, error_notifications = self.make_loader()
-        share_service.list_shared_files.return_value = shared_files_info
+        calls = {}
+
+        class FakeShareService:
+            def load_shared_paths(self, share_url, password):
+                raise AssertionError("load_shared_paths should not be called")
+
+            def list_shared_files(
+                self,
+                shared_paths,
+                folder_filter=None,
+                progress_callback=None,
+                exclude_folder_filter=None,
+            ):
+                calls["shared_paths"] = shared_paths
+                calls["folder_filter"] = folder_filter
+                calls["exclude_folder_filter"] = exclude_folder_filter
+                if progress_callback is None:
+                    raise AssertionError("progress_callback should be forwarded")
+                progress_callback("info", "来自 SharedPathService 的进度")
+                return shared_files_info
+
+        loader, _share_service, progress_messages, error_notifications = self.make_loader(
+            FakeShareService()
+        )
 
         result = loader.load_files(context, "movies", r"^node_modules$")
 
@@ -121,15 +161,33 @@ class ShareLoaderTest(unittest.TestCase):
         self.assertNotIn("shared_files_info", context)
         self.assertEqual(shared_files_info, result["shared_files_info"])
         self.assertEqual([shared_path], result["shared_paths"])
-        args, kwargs = share_service.list_shared_files.call_args
-        self.assertEqual([shared_path], args[0])
-        self.assertEqual("movies", args[1])
-        self.assertEqual(r"^node_modules$", kwargs["exclude_folder_filter"])
-        callback = args[2]
-        callback("info", "来自 SharedPathService 的进度")
+        self.assertEqual([shared_path], calls["shared_paths"])
+        self.assertEqual("movies", calls["folder_filter"])
+        self.assertEqual(r"^node_modules$", calls["exclude_folder_filter"])
         self.assertIn(("info", "来自 SharedPathService 的进度"), progress_messages)
         self.assertIn(("info", "开始获取共享文件列表"), progress_messages)
         self.assertIn(("info", "获取到 1 个共享文件"), progress_messages)
+        self.assertEqual([], error_notifications)
+
+    def test_load_files_returns_copied_context_for_empty_file_list(self):
+        shared_path = self.make_shared_path()
+        context = {
+            "shared_paths": [shared_path],
+            "uk": 1,
+            "share_id": 2,
+            "bdstoken": "token",
+        }
+        original_context = dict(context)
+        loader, share_service, progress_messages, error_notifications = self.make_loader()
+        share_service.list_shared_files.return_value = []
+
+        result = loader.load_files(context, "movies", r"^node_modules$")
+
+        self.assertIsNot(result, context)
+        self.assertEqual(original_context, context)
+        self.assertEqual([], result["shared_files_info"])
+        self.assertEqual([shared_path], result["shared_paths"])
+        self.assertIn(("info", "获取到 0 个共享文件"), progress_messages)
         self.assertEqual([], error_notifications)
 
     def test_load_files_propagates_list_error(self):
