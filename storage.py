@@ -660,13 +660,10 @@ class BaiduStorage:
         progress_callback=None,
         exclude_folder_filter=None,
     ):
-        context = self._load_share_entries(share_url, pwd, progress_callback)
-        if not context:
-            return None
-        return self._load_share_files(
-            context,
+        return self._share_loader(progress_callback).load_context(
+            share_url,
+            pwd,
             folder_filter,
-            progress_callback,
             exclude_folder_filter=exclude_folder_filter,
         )
 
