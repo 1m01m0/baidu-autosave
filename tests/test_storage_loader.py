@@ -169,6 +169,41 @@ class ShareLoaderTest(unittest.TestCase):
         self.assertIn(("info", "获取到 1 个共享文件"), progress_messages)
         self.assertEqual([], error_notifications)
 
+    def test_load_files_with_default_progress_passes_none_callback(self):
+        shared_path = self.make_shared_path()
+        context = {
+            "shared_paths": [shared_path],
+            "uk": 1,
+            "share_id": 2,
+            "bdstoken": "token",
+        }
+        shared_files_info = [{"fs_id": 10, "path": "movie.mp4"}]
+        calls = {}
+
+        class FakeShareService:
+            def list_shared_files(
+                self,
+                shared_paths,
+                folder_filter=None,
+                progress_callback=None,
+                exclude_folder_filter=None,
+            ):
+                calls["shared_paths"] = shared_paths
+                calls["folder_filter"] = folder_filter
+                calls["progress_callback_is_none"] = progress_callback is None
+                calls["exclude_folder_filter"] = exclude_folder_filter
+                return shared_files_info
+
+        loader = ShareLoader(FakeShareService())
+
+        result = loader.load_files(context, "movies", r"^node_modules$")
+
+        self.assertEqual(shared_files_info, result["shared_files_info"])
+        self.assertEqual([shared_path], calls["shared_paths"])
+        self.assertEqual("movies", calls["folder_filter"])
+        self.assertTrue(calls["progress_callback_is_none"])
+        self.assertEqual(r"^node_modules$", calls["exclude_folder_filter"])
+
     def test_load_files_returns_copied_context_for_empty_file_list(self):
         shared_path = self.make_shared_path()
         context = {

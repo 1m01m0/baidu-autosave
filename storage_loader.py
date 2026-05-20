@@ -10,6 +10,7 @@ class ShareLoader:
     def __init__(self, share_service, progress=None, error_notifier=None):
         self.share_service = share_service
         self.progress = progress or ProgressReporter()
+        self._list_files_progress_callback = None if progress is None else progress.report
         self.error_notifier = error_notifier
 
     def load_entries(self, share_url, pwd=None):
@@ -39,7 +40,7 @@ class ShareLoader:
         shared_files_info = self.share_service.list_shared_files(
             context["shared_paths"],
             folder_filter,
-            self.progress.report,
+            self._list_files_progress_callback,
             exclude_folder_filter=exclude_folder_filter,
         )
         self.progress.report("info", f"获取到 {len(shared_files_info)} 个共享文件")
