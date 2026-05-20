@@ -302,6 +302,46 @@ class DirTreeTraverserTest(unittest.TestCase):
         self.assertIn(("info", "跳过排除目录: skip"), progress_messages)
         self.assertEqual([], error_notifications)
 
+    def test_child_directory_group_transfer_succeeds_without_scanning_child(self):
+        shared_dir = SimpleNamespace(path="/share/course", is_dir=True, fs_id=10)
+        child_dir = self.dir_child("/share/course", "big", 20)
+        (
+            traverser,
+            _,
+            share_service,
+            executor,
+            _,
+            error_notifications,
+        ) = self.make_traverser({"/share/course": [child_dir]})
+
+        result = traverser.traverse(
+            shared_dir,
+            "/save/course",
+            {"uk": 1, "share_id": 2, "bdstoken": "token"},
+            "url",
+            None,
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(1, result["completed_count"])
+        self.assertEqual(["big"], result["transferred_files"])
+        self.assertEqual(
+            [
+                {
+                    "dir_path": "/save/course",
+                    "fs_ids": [20],
+                    "share_url": "url",
+                    "uk": 1,
+                    "share_id": 2,
+                    "bdstoken": "token",
+                }
+            ],
+            executor.group_calls,
+        )
+        self.assertEqual([("/share/course", 1, 2, "token")], share_service.calls)
+        self.assertEqual([], executor.transfer_plan_batches)
+        self.assertEqual([], error_notifications)
+
     def test_count_limit_dir_transfer_pushes_child_to_stack(self):
         shared_dir = SimpleNamespace(path="/share/course", is_dir=True, fs_id=10)
         child_dir = self.dir_child("/share/course", "big", 20)
@@ -333,6 +373,20 @@ class DirTreeTraverserTest(unittest.TestCase):
         items = first_batch["items"]
         self.assertTrue(result["success"])
         self.assertEqual(1, result["completed_count"])
+        self.assertEqual(
+            [
+                {
+                    "dir_path": "/save/course",
+                    "fs_ids": [20],
+                    "share_url": "url",
+                    "uk": 1,
+                    "share_id": 2,
+                    "bdstoken": "token",
+                }
+            ],
+            executor.group_calls,
+        )
+        self.assertEqual([], executor.group_side_effects)
         self.assertEqual(
             [("/share/course", 1, 2, "token"), ("/share/course/big", 1, 2, "token")],
             share_service.calls,
@@ -379,13 +433,27 @@ class DirTreeTraverserTest(unittest.TestCase):
 
         self.assertFalse(result["success"])
         self.assertEqual(1, result["failed_count"])
+        self.assertEqual(
+            [
+                {
+                    "dir_path": "/save/course",
+                    "fs_ids": [20],
+                    "share_url": "url",
+                    "uk": 1,
+                    "share_id": 2,
+                    "bdstoken": "token",
+                }
+            ],
+            executor.group_calls,
+        )
+        self.assertEqual([], executor.group_side_effects)
         self.assertEqual([], executor.transfer_plan_batches)
         self.assertIn(("error", "创建目录失败: /save/course/big"), progress_messages)
         self.assertEqual([], error_notifications)
 
     def test_directory_creation_failure_returns_failure_result(self):
         shared_dir = SimpleNamespace(path="/share/course", is_dir=True, fs_id=10)
-        traverser, _, _, _, progress_messages, _ = self.make_traverser(
+        traverser, _, share_service, executor, progress_messages, _ = self.make_traverser(
             {"/share/course": []}, failing_dirs={"/save/course"}
         )
 
@@ -401,6 +469,9 @@ class DirTreeTraverserTest(unittest.TestCase):
         self.assertFalse(result["partial"])
         self.assertEqual(1, result["failed_count"])
         self.assertEqual("目录分治转存失败，失败 1 项，跳过 0 个目录", result["error"])
+        self.assertEqual([], share_service.calls)
+        self.assertEqual([], executor.transfer_plan_batches)
+        self.assertEqual([], executor.group_calls)
         self.assertIn(("error", "创建目录失败: /save/course"), progress_messages)
 
     def test_progress_reports_scan_completion_and_final_success(self):
