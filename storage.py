@@ -37,6 +37,7 @@ from storage_errors import (
     parse_share_error,
 )
 from storage_filter import CandidateFilter
+from storage_loader import ShareLoader
 from storage_models import DirTreeFrame, TransferItem
 from storage_paths import StoragePathService
 from storage_progress import ProgressReporter
@@ -622,30 +623,21 @@ class BaiduStorage:
     def _normalize_save_dir(self, save_dir):
         return self.path_service.normalize_path(save_dir) if save_dir else save_dir
 
-    def _load_share_entries(self, share_url, pwd, progress_callback=None):
-        masked_share_url = mask_share_url(share_url) or share_url
-        if progress_callback:
-            progress_callback("info", f"【步骤1/4】访问分享链接: {masked_share_url}")
-        if pwd and progress_callback:
-            progress_callback("info", "使用密码访问分享链接")
-
-        shared_paths = self.share_service.load_shared_paths(share_url, pwd)
-        if not shared_paths:
+    def _share_loader(self, progress_callback=None):
+        def notify_error(error, context_message, collect=True):
             handle_error_and_notify(
-                ValueError("获取分享文件列表失败"),
-                "获取分享文件列表失败",
+                error,
+                context_message,
                 self.wechat_notifier,
                 None,
-                collect=True,
+                collect=collect,
             )
-            return None
 
-        return {
-            "shared_paths": shared_paths,
-            "uk": shared_paths[0].uk,
-            "share_id": shared_paths[0].share_id,
-            "bdstoken": shared_paths[0].bdstoken,
-        }
+        progress = ProgressReporter(progress_callback) if progress_callback else None
+        return ShareLoader(self.share_service, progress, notify_error)
+
+    def _load_share_entries(self, share_url, pwd, progress_callback=None):
+        return self._share_loader(progress_callback).load_entries(share_url, pwd)
 
     def _load_share_files(
         self,
@@ -654,21 +646,11 @@ class BaiduStorage:
         progress_callback=None,
         exclude_folder_filter=None,
     ):
-        if progress_callback:
-            progress_callback("info", "开始获取共享文件列表")
-        shared_files_info = self.share_service.list_shared_files(
-            context["shared_paths"],
+        return self._share_loader(progress_callback).load_files(
+            context,
             folder_filter,
-            progress_callback,
             exclude_folder_filter=exclude_folder_filter,
         )
-
-        if progress_callback:
-            progress_callback("info", f"获取到 {len(shared_files_info)} 个共享文件")
-
-        context = dict(context)
-        context["shared_files_info"] = shared_files_info
-        return context
 
     def _load_share_context(
         self,
