@@ -211,20 +211,46 @@ class ShareLoaderTest(unittest.TestCase):
     def test_load_context_combines_entries_and_files(self):
         shared_path = self.make_shared_path()
         shared_files_info = [{"fs_id": 10, "path": "movie.mp4"}]
-        loader, share_service, progress_messages, error_notifications = self.make_loader()
-        share_service.load_shared_paths.return_value = [shared_path]
-        share_service.list_shared_files.return_value = shared_files_info
+        calls = {}
+
+        class FakeShareService:
+            def load_shared_paths(self, share_url, password):
+                calls["load_shared_paths"] = (share_url, password)
+                return [shared_path]
+
+            def list_shared_files(
+                self,
+                shared_paths,
+                folder_filter=None,
+                progress_callback=None,
+                exclude_folder_filter=None,
+            ):
+                calls["shared_paths"] = shared_paths
+                calls["folder_filter"] = folder_filter
+                calls["exclude_folder_filter"] = exclude_folder_filter
+                calls["progress_callback_callable"] = callable(progress_callback)
+                if not callable(progress_callback):
+                    raise AssertionError("progress_callback should be callable")
+                progress_callback("info", "来自 SharedPathService 的进度")
+                return shared_files_info
+
+        loader, _share_service, progress_messages, error_notifications = self.make_loader(
+            FakeShareService()
+        )
 
         result = loader.load_context("share-url", "pwd", "movies", r"^skip$")
 
         self.assertEqual([shared_path], result["shared_paths"])
         self.assertEqual(shared_files_info, result["shared_files_info"])
-        share_service.load_shared_paths.assert_called_once_with("share-url", "pwd")
-        args, kwargs = share_service.list_shared_files.call_args
-        self.assertEqual([shared_path], args[0])
-        self.assertEqual("movies", args[1])
-        self.assertEqual(r"^skip$", kwargs["exclude_folder_filter"])
+        self.assertEqual(("share-url", "pwd"), calls["load_shared_paths"])
+        self.assertEqual([shared_path], calls["shared_paths"])
+        self.assertEqual("movies", calls["folder_filter"])
+        self.assertEqual(r"^skip$", calls["exclude_folder_filter"])
+        self.assertTrue(calls["progress_callback_callable"])
         self.assertIn(("info", "使用密码访问分享链接"), progress_messages)
+        self.assertIn(("info", "开始获取共享文件列表"), progress_messages)
+        self.assertIn(("info", "来自 SharedPathService 的进度"), progress_messages)
+        self.assertIn(("info", "获取到 1 个共享文件"), progress_messages)
         self.assertEqual([], error_notifications)
 
     def test_load_context_stops_when_entries_fail(self):
