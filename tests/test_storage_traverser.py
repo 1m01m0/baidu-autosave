@@ -207,6 +207,13 @@ class DirTreeTraverserTest(unittest.TestCase):
             [2, 2, 1],
             [len(batch["items"]) for batch in executor.transfer_plan_batches],
         )
+        self.assertEqual(
+            [[1, 2], [3, 4], [5]],
+            [
+                [item.fs_id for item in batch["items"]]
+                for batch in executor.transfer_plan_batches
+            ],
+        )
         self.assertEqual([], error_notifications)
 
     def test_full_file_batch_flushes_before_generator_is_exhausted(self):
@@ -304,7 +311,7 @@ class DirTreeTraverserTest(unittest.TestCase):
         }
         (
             traverser,
-            _,
+            path_service,
             share_service,
             executor,
             progress_messages,
@@ -330,12 +337,50 @@ class DirTreeTraverserTest(unittest.TestCase):
             [("/share/course", 1, 2, "token"), ("/share/course/big", 1, 2, "token")],
             share_service.calls,
         )
+        self.assertEqual(
+            ["/save/course", "/save/course/big"], path_service.ensured_dirs
+        )
         self.assertIn(("warning", "子目录超量，继续拆分: big"), progress_messages)
         self.assertEqual("/save/course/big", first_batch["target_dir"])
         self.assertEqual("/save/course/big", items[0].dir_path)
         self.assertEqual("a.txt", items[0].clean_path)
         self.assertEqual("a.txt", items[0].final_path)
         self.assertEqual([21], [item.fs_id for item in items])
+        self.assertEqual([], error_notifications)
+
+    def test_child_directory_creation_failure_after_count_limit_reports_progress_only(self):
+        shared_dir = SimpleNamespace(path="/share/course", is_dir=True, fs_id=10)
+        child_dir = self.dir_child("/share/course", "big", 20)
+        children_by_path = {
+            "/share/course": [child_dir],
+            "/share/course/big": [self.file_child("/share/course/big", "a.txt", 21)],
+        }
+        (
+            traverser,
+            _,
+            _,
+            executor,
+            progress_messages,
+            error_notifications,
+        ) = self.make_traverser(
+            children_by_path, failing_dirs={"/save/course/big"}
+        )
+        executor.group_side_effects.append(
+            RuntimeError("error_code: -33, message: 一次支持操作999个")
+        )
+
+        result = traverser.traverse(
+            shared_dir,
+            "/save/course",
+            {"uk": 1, "share_id": 2, "bdstoken": "token"},
+            "url",
+            None,
+        )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(1, result["failed_count"])
+        self.assertEqual([], executor.transfer_plan_batches)
+        self.assertIn(("error", "创建目录失败: /save/course/big"), progress_messages)
         self.assertEqual([], error_notifications)
 
     def test_directory_creation_failure_returns_failure_result(self):
