@@ -14,13 +14,23 @@ Completed foundation work:
 - `ProgressReporter` is in `storage_progress.py`.
 - `CandidateFilter` is in `storage_filter.py`.
 - `BaiduStorage` keeps candidate-analysis wrapper methods and delegates to `CandidateFilter`.
+- `DirTreeTraverser` is in `storage_traverser.py`.
+- `BaiduStorage` keeps directory-tree private wrapper methods and delegates directory divide-and-conquer traversal to `DirTreeTraverser`.
 
 Current verification baseline:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python -B -m unittest tests.test_storage_filter
-PYTHONDONTWRITEBYTECODE=1 python -B -m unittest tests.test_storage tests.test_storage_filter
+PYTHONDONTWRITEBYTECODE=1 python -B -m unittest tests.test_storage_traverser
+PYTHONDONTWRITEBYTECODE=1 python -B -m unittest tests.test_storage tests.test_storage_filter tests.test_storage_traverser
 PYTHONDONTWRITEBYTECODE=1 python -B -m unittest discover -s tests -p "test_*.py" -b
+```
+
+Most recent full-suite verification after DirTreeTraverser extraction:
+
+```text
+Ran 273 tests in 0.250s
+OK
 ```
 
 All future tasks must continue using `unittest`; do not add Hypothesis, pytest-only behavior, or new test dependencies.
@@ -51,19 +61,19 @@ All future tasks must continue using `unittest`; do not add Hypothesis, pytest-o
   - [x] 3.5 Add direct `unittest` coverage in `tests/test_storage_filter.py`.
   - [x] 3.6 Verify `tests.test_storage`, `tests.test_storage_filter`, and the full suite.
 
-- [ ] 4. Design DirTreeTraverser extraction
-  - [ ] 4.1 Review current directory traversal methods in `storage.py`.
-  - [ ] 4.2 Define the minimal `DirTreeTraverser` constructor and transfer-executor interface.
-  - [ ] 4.3 Decide which existing `BaiduStorage` private methods remain as wrappers.
-  - [ ] 4.4 Define how `ProgressReporter` replaces only directory-traversal progress callbacks.
-  - [ ] 4.5 Write and review a focused design document before implementation.
+- [x] 4. Design DirTreeTraverser extraction
+  - [x] 4.1 Review current directory traversal methods in `storage.py`.
+  - [x] 4.2 Define the minimal `DirTreeTraverser` constructor and transfer-executor interface.
+  - [x] 4.3 Decide which existing `BaiduStorage` private methods remain as wrappers.
+  - [x] 4.4 Define how `ProgressReporter` replaces only directory-traversal progress callbacks.
+  - [x] 4.5 Write and review a focused design document before implementation.
 
-- [ ] 5. Implement DirTreeTraverser
-  - [ ] 5.1 Create `storage_traverser.py`.
-  - [ ] 5.2 Move directory-tree frame initialization, child handling, batching, count-limit fallback, and result building into `DirTreeTraverser`.
-  - [ ] 5.3 Keep `BaiduStorage` wrapper methods for compatibility.
-  - [ ] 5.4 Add `tests/test_storage_traverser.py` using `unittest`.
-  - [ ] 5.5 Verify targeted storage/traverser tests and full suite.
+- [x] 5. Implement DirTreeTraverser
+  - [x] 5.1 Create `storage_traverser.py`.
+  - [x] 5.2 Move directory-tree frame initialization, child handling, batching, count-limit fallback, and result building into `DirTreeTraverser`.
+  - [x] 5.3 Keep `BaiduStorage` wrapper methods for compatibility.
+  - [x] 5.4 Add `tests/test_storage_traverser.py` using `unittest`.
+  - [x] 5.5 Verify targeted storage/traverser tests and full suite.
 
 - [ ] 6. Extract ShareLoader
   - [ ] 6.1 Create `storage_loader.py` with `ShareLoader`.
@@ -94,8 +104,8 @@ All future tasks must continue using `unittest`; do not add Hypothesis, pytest-o
 
 ```json
 {
-  "completed": ["1", "2", "3"],
-  "next": "4",
-  "remaining_order": ["4", "5", "6", "7", "8", "9"]
+  "completed": ["1", "2", "3", "4", "5"],
+  "next": "6",
+  "remaining_order": ["6", "7", "8", "9"]
 }
 ```
