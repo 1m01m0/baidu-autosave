@@ -1240,6 +1240,22 @@ class BaiduStorage:
             notify_error,
         )
 
+    def _dir_tree_traverser_with_legacy_flush(self, progress_callback=None):
+        traverser = self._dir_tree_traverser(progress_callback)
+
+        def flush_file_batch(file_transfer_list, target_dir, context, share_url, stats):
+            return self._flush_dir_tree_file_batch(
+                file_transfer_list,
+                target_dir,
+                context,
+                share_url,
+                stats,
+                progress_callback,
+            )
+
+        traverser.flush_file_batch = flush_file_batch
+        return traverser
+
     @staticmethod
     def _new_dir_tree_divide_stats():
         return DirTreeTraverser.new_stats()
@@ -1278,7 +1294,7 @@ class BaiduStorage:
         )
 
     def _finish_dir_tree_frame(self, frame, context, share_url, stats, progress_callback=None):
-        return self._dir_tree_traverser(progress_callback).finish_frame(
+        return self._dir_tree_traverser_with_legacy_flush(progress_callback).finish_frame(
             frame,
             context,
             share_url,
@@ -1288,7 +1304,9 @@ class BaiduStorage:
     def _handle_dir_tree_iter_error(
         self, frame, context, share_url, stats, exc, progress_callback=None
     ):
-        return self._dir_tree_traverser(progress_callback).handle_iter_error(
+        return self._dir_tree_traverser_with_legacy_flush(
+            progress_callback
+        ).handle_iter_error(
             frame,
             context,
             share_url,
@@ -1299,7 +1317,9 @@ class BaiduStorage:
     def _handle_dir_tree_file_child(
         self, frame, child, context, share_url, stats, progress_callback=None
     ):
-        return self._dir_tree_traverser(progress_callback).handle_file_child(
+        return self._dir_tree_traverser_with_legacy_flush(
+            progress_callback
+        ).handle_file_child(
             frame,
             child,
             context,
@@ -1318,7 +1338,9 @@ class BaiduStorage:
         stats,
         progress_callback=None,
     ):
-        return self._dir_tree_traverser(progress_callback).handle_dir_child(
+        return self._dir_tree_traverser_with_legacy_flush(
+            progress_callback
+        ).handle_dir_child(
             stack,
             frame,
             child,
@@ -1339,19 +1361,80 @@ class BaiduStorage:
         progress_callback=None,
     ):
         traverser = self._dir_tree_traverser(progress_callback)
-        flush_override = self.__dict__.get("_flush_dir_tree_file_batch")
-        if flush_override is not None:
-            def flush_file_batch(file_transfer_list, target_dir, context, share_url, stats):
-                return flush_override(
-                    file_transfer_list,
-                    target_dir,
-                    context,
-                    share_url,
-                    stats,
-                    progress_callback,
-                )
 
-            traverser.flush_file_batch = flush_file_batch
+        def flush_file_batch(file_transfer_list, target_dir, context, share_url, stats):
+            return self._flush_dir_tree_file_batch(
+                file_transfer_list,
+                target_dir,
+                context,
+                share_url,
+                stats,
+                progress_callback,
+            )
+
+        def initialize_frame(frame, context, stats):
+            return self._initialize_dir_tree_frame(
+                frame,
+                context,
+                stats,
+                progress_callback,
+            )
+
+        def finish_frame(frame, context, share_url, stats):
+            return self._finish_dir_tree_frame(
+                frame,
+                context,
+                share_url,
+                stats,
+                progress_callback,
+            )
+
+        def handle_iter_error(frame, context, share_url, stats, exc):
+            return self._handle_dir_tree_iter_error(
+                frame,
+                context,
+                share_url,
+                stats,
+                exc,
+                progress_callback,
+            )
+
+        def handle_file_child(frame, child, context, share_url, stats):
+            return self._handle_dir_tree_file_child(
+                frame,
+                child,
+                context,
+                share_url,
+                stats,
+                progress_callback,
+            )
+
+        def handle_dir_child(
+            stack,
+            frame,
+            child,
+            context,
+            share_url,
+            exclude_folder_filter,
+            stats,
+        ):
+            return self._handle_dir_tree_dir_child(
+                stack,
+                frame,
+                child,
+                context,
+                share_url,
+                exclude_folder_filter,
+                stats,
+                progress_callback,
+            )
+
+        traverser.flush_file_batch = flush_file_batch
+        traverser.initialize_frame = initialize_frame
+        traverser.finish_frame = finish_frame
+        traverser.handle_iter_error = handle_iter_error
+        traverser.handle_file_child = handle_file_child
+        traverser.handle_dir_child = handle_dir_child
         return traverser.collect(
             shared_dir,
             target_dir,
@@ -1370,13 +1453,27 @@ class BaiduStorage:
         exclude_folder_filter,
         progress_callback=None,
     ):
-        return self._dir_tree_traverser(progress_callback).traverse(
+        stats = self._new_dir_tree_divide_stats()
+        folder_name = os.path.basename(
+            str(getattr(shared_dir, "path", shared_dir)).rstrip("/")
+        )
+        if should_exclude_folder(folder_name, exclude_folder_filter):
+            stats["skipped_dir_count"] = 1
+            ProgressReporter(progress_callback).report(
+                "info", f"跳过排除目录: {folder_name}"
+            )
+            return self._build_dir_tree_divide_result(stats, progress_callback)
+
+        self._transfer_dir_tree_divide_collect(
             shared_dir,
             target_dir,
             context,
             share_url,
             exclude_folder_filter,
+            stats,
+            progress_callback,
         )
+        return self._build_dir_tree_divide_result(stats, progress_callback)
 
     def _try_transfer_dir_fast_path(
         self,
