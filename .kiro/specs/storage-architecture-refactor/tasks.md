@@ -18,6 +18,7 @@ Completed foundation work:
 - `BaiduStorage` keeps directory-tree private wrapper methods and delegates directory divide-and-conquer traversal to `DirTreeTraverser`.
 - `ShareLoader` is in `storage_loader.py`.
 - `BaiduStorage` keeps share-loading private wrapper methods and delegates share entry/context loading to `ShareLoader`.
+- `BaiduStorage` centralizes orchestrator-level error notifications through `_notify_error()`.
 
 Current verification baseline:
 
@@ -25,14 +26,15 @@ Current verification baseline:
 PYTHONDONTWRITEBYTECODE=1 python -B -m unittest tests.test_storage_filter
 PYTHONDONTWRITEBYTECODE=1 python -B -m unittest tests.test_storage_traverser
 PYTHONDONTWRITEBYTECODE=1 python -B -m unittest tests.test_storage_loader
+PYTHONDONTWRITEBYTECODE=1 python -B -m unittest tests.test_storage.BaiduStorageErrorNotificationTests
 PYTHONDONTWRITEBYTECODE=1 python -B -m unittest tests.test_storage tests.test_storage_filter tests.test_storage_traverser tests.test_storage_loader
 PYTHONDONTWRITEBYTECODE=1 python -B -m unittest discover -s tests -p "test_*.py" -b
 ```
 
-Most recent full-suite verification after DirTreeTraverser extraction:
+Most recent full-suite verification after centralized error notification:
 
 ```text
-Ran 273 tests in 0.250s
+Ran 286 tests in 0.254s
 OK
 ```
 
@@ -85,11 +87,11 @@ All future tasks must continue using `unittest`; do not add Hypothesis, pytest-o
   - [x] 6.4 Add focused `unittest` coverage.
   - [x] 6.5 Verify existing workflow and runner tests.
 
-- [ ] 7. Centralize error notification
-  - [ ] 7.1 Add `_notify_error(error, context_message, extra_info=None, collect=True)` to `BaiduStorage` or the eventual orchestrator.
-  - [ ] 7.2 Replace direct `handle_error_and_notify(...)` calls in small batches.
-  - [ ] 7.3 Verify each replaced call preserves notification arguments.
-  - [ ] 7.4 Add focused tests for `_notify_error` argument forwarding.
+- [x] 7. Centralize error notification
+  - [x] 7.1 Add `_notify_error(error, context_message, extra_info=None, collect=True)` to `BaiduStorage` or the eventual orchestrator.
+  - [x] 7.2 Replace direct `handle_error_and_notify(...)` calls in small batches.
+  - [x] 7.3 Verify each replaced call preserves notification arguments.
+  - [x] 7.4 Add focused tests for `_notify_error` argument forwarding.
 
 - [ ] 8. Reduce BaiduStorage toward a thin orchestrator
   - [ ] 8.1 Introduce collaborator injection only after `CandidateFilter`, `DirTreeTraverser`, `ShareLoader`, and `_notify_error` are stable.
@@ -107,8 +109,8 @@ All future tasks must continue using `unittest`; do not add Hypothesis, pytest-o
 
 ```json
 {
-  "completed": ["1", "2", "3", "4", "5", "6"],
-  "next": "7",
-  "remaining_order": ["7", "8", "9"]
+  "completed": ["1", "2", "3", "4", "5", "6", "7"],
+  "next": "8",
+  "remaining_order": ["8", "9"]
 }
 ```

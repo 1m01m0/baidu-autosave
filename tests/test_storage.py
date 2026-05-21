@@ -375,6 +375,59 @@ class BaiduClientAdapterRetryTests(unittest.TestCase):
             adapter.list("/save")
 
 
+class BaiduStorageErrorNotificationTests(unittest.TestCase):
+    def setUp(self):
+        self.storage = BaiduStorage.__new__(BaiduStorage)
+        self.storage.wechat_notifier = Mock()
+
+    def test_notify_error_preserves_none_config_and_default_collect(self):
+        error = RuntimeError("boom")
+        self.storage.config = {"name": "test-config"}
+
+        with patch("storage.handle_error_and_notify") as notify:
+            self.storage._notify_error(error, "主上下文")
+
+        notify.assert_called_once_with(
+            error,
+            "主上下文",
+            self.storage.wechat_notifier,
+            None,
+            collect=True,
+        )
+
+    def test_notify_error_appends_extra_info_and_uses_none_config_when_missing(self):
+        error = ValueError("bad")
+
+        with patch("storage.handle_error_and_notify") as notify:
+            self.storage._notify_error(
+                error,
+                "主上下文",
+                extra_info="分享链接: masked-url",
+            )
+
+        notify.assert_called_once_with(
+            error,
+            "主上下文\n分享链接: masked-url",
+            self.storage.wechat_notifier,
+            None,
+            collect=True,
+        )
+
+    def test_notify_error_forwards_collect_false(self):
+        error = RuntimeError("boom")
+
+        with patch("storage.handle_error_and_notify") as notify:
+            self.storage._notify_error(error, "立即通知上下文", collect=False)
+
+        notify.assert_called_once_with(
+            error,
+            "立即通知上下文",
+            self.storage.wechat_notifier,
+            None,
+            collect=False,
+        )
+
+
 class SharedPathServiceTests(unittest.TestCase):
     def setUp(self):
         self.service = SharedPathService(Mock())
