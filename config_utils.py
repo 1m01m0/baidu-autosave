@@ -38,11 +38,17 @@ def _is_safe_regex_replace_template(value: str) -> bool:
 
 
 def build_retry_share_config(config: Dict[str, Any]) -> Dict[str, Any]:
-    return {
+    normalized = {
         key: config[key]
         for key in RETRY_SHARE_CONFIG_KEYS
         if key in config and config[key] is not None
     }
+    parsed_share = _parse_share_url(normalized.get("share_url"), require_full=True)
+    if parsed_share:
+        normalized["share_url"] = parsed_share["share_url"]
+        if parsed_share.get("pwd") and not normalized.get("pwd"):
+            normalized["pwd"] = parsed_share["pwd"]
+    return normalized
 
 
 def retry_share_config_key(config: Dict[str, Any]) -> str:

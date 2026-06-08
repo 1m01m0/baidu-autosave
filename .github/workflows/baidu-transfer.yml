@@ -89,6 +89,7 @@ jobs:
         SHARE_URLS: ${{ secrets.SHARE_URLS }}
         SAVE_DIR: ${{ secrets.SAVE_DIR }}
         WECHAT_WEBHOOK: ${{ secrets.WECHAT_WEBHOOK }}
+        TRANSFERSHARE_FAILED_STATE_ENABLED: ${{ steps.failed_state.outputs.enabled }}
         TRANSFERSHARE_SUPPRESS_RESULT_NOTIFICATION: "1"
       run: |
         echo "开始执行转存任务 (第一次尝试)"
@@ -104,6 +105,7 @@ jobs:
         SHARE_URLS: ${{ secrets.SHARE_URLS }}
         SAVE_DIR: ${{ secrets.SAVE_DIR }}
         WECHAT_WEBHOOK: ${{ secrets.WECHAT_WEBHOOK }}
+        TRANSFERSHARE_FAILED_STATE_ENABLED: ${{ steps.failed_state.outputs.enabled }}
       run: |
         echo "第一次尝试失败，开始第二次尝试"
         echo "超时时间: 10 分钟"

@@ -38,7 +38,7 @@ def transfer_share_streaming(
     progress_callback=None,
 ):
     if progress_callback:
-        progress_callback("info", "【步骤3/4】准备转存: 流式扫描并对比文件")
+        progress_callback("info", "【步骤2/4】扫描共享文件并对比本地目录")
 
     sentinel = object()
     stream_queue = queue.Queue(maxsize=max(TRANSFER_BATCH_SIZE * 2, 1))

@@ -163,16 +163,37 @@ def mask_token(token: str, head: int = 4, tail: int = 4) -> str:
     return f"{token[:head]}***{token[-tail:]}"
 
 
-def wait_for_cookies(ctx, timeout_sec: int = 600):
-    """轮询等待直到获得 BDUSS 与 STOKEN 或超时"""
-    deadline = time.time() + timeout_sec
+def wait_for_cookies(
+    ctx,
+    timeout_sec: int = 600,
+    status_callback=None,
+    status_interval_sec: int = 30,
+):
+    """轮询等待直到获得 BDUSS 与 STOKEN 或超时。"""
+    start_time = time.time()
+    deadline = start_time + timeout_sec
+    next_status_at = start_time
     bduss, stoken = None, None
     while time.time() < deadline:
+        now = time.time()
         cookies = ctx.cookies()
         bduss = find_cookie(cookies, "BDUSS")
         stoken = find_cookie(cookies, "STOKEN")
         if bduss and stoken:
             return bduss, stoken, cookies
+        if status_callback and now >= next_status_at:
+            missing = []
+            if not bduss:
+                missing.append("BDUSS")
+            if not stoken:
+                missing.append("STOKEN")
+            elapsed = int(now - start_time)
+            remaining = max(0, int(deadline - now))
+            status_callback(
+                f"仍在等待登录 Cookie，已等待 {elapsed}s，剩余约 {remaining}s，"
+                f"缺少 {'/'.join(missing)}"
+            )
+            next_status_at = now + max(0, status_interval_sec)
         time.sleep(2)
     return bduss, stoken, ctx.cookies()
 
@@ -348,7 +369,9 @@ def do_browser_login_and_extract(
             page = ctx.new_page()
             page.goto(LOGIN_URL, wait_until="load")
 
-            bduss, stoken, cookies = wait_for_cookies(ctx, timeout_sec=600)
+            bduss, stoken, cookies = wait_for_cookies(
+                ctx, timeout_sec=600, status_callback=print
+            )
 
             # 即使未获取到最小必需项，也构建全量 Cookie
             cookie_map = build_cookie_map(cookies)

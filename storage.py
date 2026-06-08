@@ -379,11 +379,17 @@ class BaiduStorage:
             "info", index, total_count, f"处理分享链接: {masked_share_url}", progress_callback
         )
 
+        nested_progress_callback = None
+        if progress_callback:
+            nested_progress_callback = lambda level, message: self._notify_batch_progress(
+                level, index, total_count, message, progress_callback
+            )
+
         result = self.transfer_share(
             share_url=share_url,
             pwd=pwd,
             save_dir=save_dir,
-            progress_callback=progress_callback,
+            progress_callback=nested_progress_callback,
             regex_pattern=regex_pattern,
             regex_replace=regex_replace,
             folder_filter=folder_filter,
@@ -879,8 +885,17 @@ class BaiduStorage:
                     and isinstance(key[1], tuple)
                 ):
                     cache_relative_dirs = set(key[1])
-                    if cache_relative_dirs & normalized_affected:
-                        cache_keys.append(key)
+                    for cache_dir in cache_relative_dirs:
+                        for affected_dir in normalized_affected:
+                            if (
+                                cache_dir == affected_dir
+                                or cache_dir.startswith(f"{affected_dir}/")
+                                or affected_dir.startswith(f"{cache_dir}/")
+                            ):
+                                cache_keys.append(key)
+                                break
+                        if key in cache_keys:
+                            break
             for key in cache_keys:
                 self._local_files_cache.pop(key, None)
 
@@ -1479,6 +1494,13 @@ class BaiduStorage:
                     )
                 error_info = classify_storage_error(exc)
                 if error_info.retryable and attempt < max_attempts - 1:
+                    try:
+                        if self._target_child_exists(save_dir, folder_name):
+                            if progress_callback:
+                                progress_callback("warning", "整目录直接转存失败但目标目录已存在，回退逐文件对比转存")
+                            return None
+                    except Exception:
+                        pass
                     if progress_callback:
                         progress_callback("warning", f"整目录直接转存失败，准备重试: {error_info.message}")
                     time.sleep(TRANSFER_FAILED_RETRY_DELAY)

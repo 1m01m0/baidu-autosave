@@ -1187,6 +1187,44 @@ class WeChatNotifierTests(unittest.TestCase):
         self.assertNotIn("access-secret", content)
         self.assertNotIn("webhook-secret", content)
 
+    def test_failure_report_includes_failed_file_details(self):
+        notifier = WeChatNotifier("https://example.com")
+        result = {
+            "success": False,
+            "error": "全部失败",
+            "transfer_failed_files": [
+                {"clean_path": "a.txt", "final_path": "a.txt", "error": "network boom"}
+            ],
+            "rename_failed_files": [
+                {"source_path": "old/b.txt", "target_path": "new/b.txt", "error": "rename boom"}
+            ],
+        }
+
+        with patch.object(notifier, "send_message", return_value=True) as send_message:
+            self.assertTrue(notifier.send_transfer_result(result, {"save_dir": "/save"}))
+
+        message = send_message.call_args.args[0]
+        self.assertIn("转存失败", message)
+        self.assertIn("a.txt: network boom", message)
+        self.assertIn("重命名失败", message)
+        self.assertIn("old/b.txt -> new/b.txt: rename boom", message)
+
+    def test_result_report_includes_operational_warnings(self):
+        notifier = WeChatNotifier("https://example.com")
+        result = {
+            "success": False,
+            "error": "全部失败",
+            "operational_warnings": ["未配置 TRANSFERSHARE_STATE_KEY，跨 run 失败清单不会持久化"],
+        }
+
+        with patch.object(notifier, "send_message", return_value=True) as send_message:
+            self.assertTrue(notifier.send_transfer_result(result, {"save_dir": "/save"}))
+
+        message = send_message.call_args.args[0]
+        self.assertIn("运行提示", message)
+        self.assertIn("TRANSFERSHARE_STATE_KEY", message)
+        self.assertIn("跨 run 失败清单不会持久化", message)
+
 
 class BaiduStorageFlowTests(unittest.TestCase):
     def setUp(self):
@@ -1508,6 +1546,59 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.assertEqual(1, result["completed_count"])
         self.storage.client.transfer_shared_paths.assert_called_once()
 
+    def test_process_single_share_config_prefixes_nested_progress(self):
+        progress_messages = []
+
+        def fake_transfer_share(**kwargs):
+            kwargs["progress_callback"]("info", "内部扫描消息")
+            return {"success": True, "message": "完成", "transferred_files": ["a.txt"]}
+
+        self.storage.transfer_share = Mock(side_effect=fake_transfer_share)
+
+        result = self.storage._process_single_share_config(
+            2,
+            3,
+            {"share_url": "https://pan.baidu.com/s/abc12345", "save_dir": "/save"},
+            lambda level, message: progress_messages.append(message),
+        )
+
+        self.assertTrue(result["success"])
+        self.assertIn("【2/3】内部扫描消息", progress_messages)
+
+    def test_transfer_share_streaming_reports_step_two_before_step_three(self):
+        context = {
+            "shared_paths": [SimpleNamespace(is_dir=False)],
+            "uk": 1,
+            "share_id": 2,
+            "bdstoken": "token",
+        }
+        transfer_item = TransferItem(1, "/save", "a.txt", "a.txt", False, "md5-a")
+        self.storage.share_service.iter_shared_files.return_value = [
+            {"fs_id": 1, "path": "a.txt", "md5": "md5-a"}
+        ]
+        self.storage.path_service.list_local_files_in_dirs.return_value = []
+        self.storage._execute_transfer_plan = Mock(return_value=(1, [transfer_item], []))
+        progress_messages = []
+
+        result = self.storage._transfer_share_streaming(
+            context,
+            "url",
+            "/save",
+            progress_callback=lambda level, message: progress_messages.append(message),
+        )
+
+        self.assertTrue(result["success"])
+        numbered_steps = [message for message in progress_messages if "【步骤" in message]
+        step_two_index = next(
+            index for index, message in enumerate(numbered_steps) if "【步骤2/4】" in message
+        )
+        step_three_index = next(
+            (index for index, message in enumerate(numbered_steps) if "【步骤3/4】" in message),
+            None,
+        )
+        if step_three_index is not None:
+            self.assertLess(step_two_index, step_three_index)
+
     def test_transfer_share_streaming_warns_when_producer_thread_stays_alive(self):
         context = {
             "shared_paths": [Mock(is_dir=False)],
@@ -1599,6 +1690,32 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertTrue(result["fast_path"])
         self.assertEqual(2, self.storage.client.transfer_shared_paths.call_count)
+
+    def test_transfer_share_checks_target_exists_before_retrying_dir_fast_path(self):
+        shared_dir = SimpleNamespace(is_dir=True, fs_id=10, path="/share/course")
+        entry_context = {
+            "shared_paths": [shared_dir],
+            "uk": 1,
+            "share_id": 2,
+            "bdstoken": "token",
+        }
+        self.storage._normalize_save_dir = Mock(return_value="/save")
+        self.storage._load_share_entries = Mock(return_value=entry_context)
+        self.storage.path_service.ensure_dir_exists.return_value = True
+        self.storage.client.list.side_effect = [
+            [],
+            [SimpleNamespace(path="/save/course")],
+        ]
+        self.storage.client.transfer_shared_paths.side_effect = RequestsJSONDecodeError(
+            "Expecting value", "", 0
+        )
+        self.storage._transfer_share_streaming = Mock(return_value={"success": True, "message": "fallback"})
+
+        result = self.storage.transfer_share("url", save_dir="/save")
+
+        self.assertEqual({"success": True, "message": "fallback"}, result)
+        self.storage.client.transfer_shared_paths.assert_called_once()
+        self.storage._transfer_share_streaming.assert_called_once()
 
     def test_transfer_share_clears_cache_after_dir_fast_path_success(self):
         shared_dir = SimpleNamespace(is_dir=True, fs_id=10, path="/share/course")
@@ -2651,6 +2768,21 @@ class BaiduStorageFlowTests(unittest.TestCase):
 
         self.assertEqual(
             {("/save", ("c",), True): ["scan-c"], "/other": ["other"]},
+            self.storage._local_files_cache,
+        )
+
+    def test_clear_local_files_cache_with_parent_dir_removes_child_cache(self):
+        self.storage.path_service.normalize_path.side_effect = lambda path: path
+        self.storage._local_files_cache = {
+            ("/save", ("course",), True): ["scan-course"],
+            ("/save", ("course/sub",), True): ["scan-sub"],
+            ("/save", ("other",), True): ["scan-other"],
+        }
+
+        self.storage._clear_local_files_cache("/save", {"course"})
+
+        self.assertEqual(
+            {("/save", ("other",), True): ["scan-other"]},
             self.storage._local_files_cache,
         )
 

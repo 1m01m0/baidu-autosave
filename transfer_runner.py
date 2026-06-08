@@ -622,6 +622,27 @@ def persist_failed_records_safely(
         logger.info("失败清单已清理")
 
 
+def _append_operational_warning(result, warning):
+    warnings = list(result.get("operational_warnings", []))
+    if warning not in warnings:
+        warnings.append(warning)
+    result["operational_warnings"] = warnings
+    return result
+
+
+def _annotate_failed_state_warning(result, all_failed_records):
+    if os.getenv("GITHUB_ACTIONS") != "true":
+        return result
+    if os.getenv("TRANSFERSHARE_FAILED_STATE_ENABLED", "").lower() != "false":
+        return result
+    if not all_failed_records:
+        return result
+    return _append_operational_warning(
+        result,
+        "未配置 TRANSFERSHARE_STATE_KEY，跨 run 失败清单不会持久化",
+    )
+
+
 def execute_transfer_workflow(storage, logger, config):
     failed_records_load_error = False
     try:
@@ -649,6 +670,7 @@ def execute_transfer_workflow(storage, logger, config):
     all_failed_records = merge_failed_transfer_records(
         remaining_failed_records, new_retryable_records, new_deferred_records
     )
+    result = _annotate_failed_state_warning(result, all_failed_records)
     persist_failed_records_safely(
         logger, failed_records_load_error, failed_records, all_failed_records
     )

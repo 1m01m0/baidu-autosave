@@ -265,6 +265,10 @@ class WeChatNotifier:
         transferred_files = collect_transferred_files(result)
         result_msg = result.get("message") or result.get("summary", "转存成功")
         files_section = self._format_files_block("转存文件", transferred_files, lambda x: x)
+        sections = []
+        if files_section:
+            sections.append(files_section)
+        sections.extend(self._operational_warning_sections(result))
         message = self._render_report(
             heading="## 🎉 百度网盘转存报告",
             fields=[
@@ -274,14 +278,23 @@ class WeChatNotifier:
                 ("保存目录", save_dir),
                 ("结果", result_msg),
             ],
-            extra_sections=[files_section] if files_section else [],
+            extra_sections=sections,
         )
         return self.send_message(message, "markdown")
 
-    def _send_partial_report(
-        self, result: Dict[str, Any], task_desc: str, save_dir: str
-    ) -> bool:
-        error_msg = result.get("error", "部分转存成功")
+    def _operational_warning_sections(self, result: Dict[str, Any]) -> List[str]:
+        warnings = result.get("operational_warnings") or []
+        if not warnings:
+            return []
+        lines = ["\n**运行提示**:"]
+        for warning in warnings[:MAX_FILES_TO_SHOW]:
+            safe_warning = self._mask_sensitive(str(warning)) or str(warning)
+            lines.append(f"• {safe_warning}")
+        if len(warnings) > MAX_FILES_TO_SHOW:
+            lines.append(f"• ... 还有 {len(warnings) - MAX_FILES_TO_SHOW} 条提示")
+        return ["\n".join(lines)]
+
+    def _failed_file_sections(self, result: Dict[str, Any]) -> List[str]:
         transfer_failed_block = self._format_files_block(
             "转存失败",
             result.get("transfer_failed_files", []),
@@ -298,7 +311,14 @@ class WeChatNotifier:
                 f"{item.get('error')}"
             ),
         )
-        sections = [block for block in (transfer_failed_block, rename_failed_block) if block]
+        return [block for block in (transfer_failed_block, rename_failed_block) if block]
+
+    def _send_partial_report(
+        self, result: Dict[str, Any], task_desc: str, save_dir: str
+    ) -> bool:
+        error_msg = result.get("error", "部分转存成功")
+        sections = self._failed_file_sections(result)
+        sections.extend(self._operational_warning_sections(result))
         message = self._render_report(
             heading="## ⚠️ 百度网盘转存报告",
             fields=[
@@ -316,6 +336,9 @@ class WeChatNotifier:
         self, result: Dict[str, Any], task_desc: str, save_dir: str
     ) -> bool:
         error_msg = result.get("error", "未知错误")
+        sections = self._failed_file_sections(result)
+        sections.extend(self._operational_warning_sections(result))
+        sections.append("请检查分享链接是否有效，或查看详细日志排查问题。")
         message = self._render_report(
             heading="## ❌ 百度网盘转存报告",
             fields=[
@@ -325,7 +348,7 @@ class WeChatNotifier:
                 ("保存目录", save_dir),
                 ("错误信息", error_msg),
             ],
-            extra_sections=["请检查分享链接是否有效，或查看详细日志排查问题。"],
+            extra_sections=sections,
         )
         return self.send_message(message, "markdown")
 

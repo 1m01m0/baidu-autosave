@@ -13,6 +13,7 @@ from save_baidu_cookies import (
     mask_cookie_string,
     read_env_values,
     set_secret,
+    wait_for_cookies,
     write_env_file,
 )
 
@@ -191,6 +192,42 @@ class SaveBaiduCookiesTests(unittest.TestCase):
 
         self.assertIn('BAIDU_COOKIES="BDUSS=foo; STOKEN=bar"', content)
         self.assertIn('BAIDU_COOKIES_FULL="BDUSS=foo; STOKEN=bar; PANWEB=baz"', content)
+
+    def test_wait_for_cookies_reports_status_without_leaking_values(self):
+        class FakeContext:
+            def __init__(self):
+                self.calls = 0
+
+            def cookies(self):
+                self.calls += 1
+                if self.calls == 1:
+                    return []
+                if self.calls == 2:
+                    return [
+                        {"name": "BDUSS", "value": "bduss-secret", "domain": "pan.baidu.com"}
+                    ]
+                return [
+                    {"name": "BDUSS", "value": "bduss-secret", "domain": "pan.baidu.com"},
+                    {"name": "STOKEN", "value": "stoken-secret", "domain": "pan.baidu.com"},
+                ]
+
+        messages = []
+
+        with patch("save_baidu_cookies.time.sleep"):
+            bduss, stoken, _ = wait_for_cookies(
+                FakeContext(),
+                timeout_sec=10,
+                status_callback=messages.append,
+                status_interval_sec=0,
+            )
+
+        self.assertEqual("bduss-secret", bduss)
+        self.assertEqual("stoken-secret", stoken)
+        self.assertTrue(any("缺少 BDUSS/STOKEN" in message for message in messages))
+        self.assertTrue(any("缺少 STOKEN" in message for message in messages))
+        joined = "\n".join(messages)
+        self.assertNotIn("bduss-secret", joined)
+        self.assertNotIn("stoken-secret", joined)
 
 
 if __name__ == "__main__":

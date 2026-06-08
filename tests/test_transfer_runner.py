@@ -104,6 +104,33 @@ class TransferRunnerSmokeTests(unittest.TestCase):
         notifier.send_transfer_result.assert_not_called()
         logger.info.assert_called_with("已抑制本次运行的最终结果通知")
 
+    def test_failed_state_disabled_warning_is_added_only_when_records_remain(self):
+        result = {"success": False, "error": "失败"}
+
+        with patch.dict(
+            os.environ,
+            {"GITHUB_ACTIONS": "true", "TRANSFERSHARE_FAILED_STATE_ENABLED": "false"},
+            clear=False,
+        ):
+            transfer_runner._annotate_failed_state_warning(
+                result, [{"share_config": {"share_url": "url"}}]
+            )
+
+        self.assertEqual(
+            ["未配置 TRANSFERSHARE_STATE_KEY，跨 run 失败清单不会持久化"],
+            result["operational_warnings"],
+        )
+
+        clean_result = {"success": False, "error": "失败"}
+        with patch.dict(
+            os.environ,
+            {"GITHUB_ACTIONS": "true", "TRANSFERSHARE_FAILED_STATE_ENABLED": "false"},
+            clear=False,
+        ):
+            transfer_runner._annotate_failed_state_warning(clean_result, [])
+
+        self.assertNotIn("operational_warnings", clean_result)
+
     def test_main_exits_when_transfer_fails(self):
         config = {
             "config_source": "file",

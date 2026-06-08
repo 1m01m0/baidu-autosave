@@ -9,6 +9,7 @@ from config_utils import (
     load_runtime_config,
     normalize_share_urls_value,
     parse_share_links_from_text,
+    retry_share_config_key,
     validate_runtime_config,
 )
 
@@ -87,6 +88,32 @@ class NormalizeShareUrlsValueTests(unittest.TestCase):
 
         self.assertEqual("https://pan.baidu.com/s/abc12345", result["share_configs"][0]["share_url"])
         self.assertEqual("1a2B", result["share_configs"][0]["pwd"])
+
+
+class RetryShareConfigKeyTests(unittest.TestCase):
+    def test_retry_share_config_key_canonicalizes_pwd_in_share_url(self):
+        key_from_url = retry_share_config_key(
+            {"share_url": "https://pan.baidu.com/s/abc12345?pwd=1a2B", "save_dir": "/Auto"}
+        )
+        key_from_field = retry_share_config_key(
+            {
+                "share_url": "https://pan.baidu.com/s/abc12345",
+                "pwd": "1a2B",
+                "save_dir": "/Auto",
+            }
+        )
+
+        self.assertEqual(key_from_field, key_from_url)
+
+    def test_retry_share_config_key_keeps_distinct_save_dirs_distinct(self):
+        self.assertNotEqual(
+            retry_share_config_key(
+                {"share_url": "https://pan.baidu.com/s/abc12345", "save_dir": "/A"}
+            ),
+            retry_share_config_key(
+                {"share_url": "https://pan.baidu.com/s/abc12345", "save_dir": "/B"}
+            ),
+        )
 
 
 class ApplyGlobalShareDefaultsTests(unittest.TestCase):

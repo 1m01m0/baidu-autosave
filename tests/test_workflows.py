@@ -75,6 +75,19 @@ class WorkflowStaticTests(unittest.TestCase):
             second_attempt.get("env", {}),
         )
 
+    def test_baidu_transfer_workflow_passes_failed_state_enabled_flag(self):
+        _, workflow = load_workflow(".github/workflows/baidu-transfer.yml")
+        steps = workflow_steps(workflow, "transfer")
+        transfer_steps = [step for step in steps if step.get("name", "").startswith("Run transfer task")]
+
+        self.assertEqual(2, len(transfer_steps))
+        for step in transfer_steps:
+            self.assertEqual(
+                "${{ steps.failed_state.outputs.enabled }}",
+                step["env"].get("TRANSFERSHARE_FAILED_STATE_ENABLED"),
+            )
+            self.assertNotIn("TRANSFERSHARE_STATE_KEY", step["env"])
+
     def test_baidu_transfer_workflow_caches_only_encrypted_failed_state(self):
         content, _ = load_workflow(".github/workflows/baidu-transfer.yml")
 
