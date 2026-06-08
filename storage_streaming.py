@@ -117,8 +117,7 @@ def transfer_share_streaming(
             )
             total_transfer_count += len(transfer_list)
             transfer_failed_files.extend(
-                storage._build_transfer_failed_record(item, error_info)
-                for item in transfer_list
+                storage._build_transfer_failed_record(item, error_info) for item in transfer_list
             )
             return None
 
@@ -135,9 +134,7 @@ def transfer_share_streaming(
             return
         if pending_transfer["future"] is not None:
             _drain_pending_transfer()
-        pending_transfer["future"] = transfer_executor.submit(
-            _run_transfer_plan, transfer_list
-        )
+        pending_transfer["future"] = transfer_executor.submit(_run_transfer_plan, transfer_list)
         pending_transfer["items"] = transfer_list
 
     def flush_transfer_item_buffer(force=False):
@@ -156,8 +153,7 @@ def transfer_share_streaming(
             _drain_pending_transfer()
             error_info = classify_storage_error(dir_error.get("error", "创建目录失败"))
             transfer_failed_files.extend(
-                storage._build_transfer_failed_record(item, error_info)
-                for item in transfer_list
+                storage._build_transfer_failed_record(item, error_info) for item in transfer_list
             )
             total_transfer_count += len(transfer_list)
             return dir_error
@@ -235,9 +231,7 @@ def transfer_share_streaming(
         if transfer_executor is not None:
             transfer_executor.shutdown(wait=True)
 
-    storage._report_transfer_candidate_summary(
-        summary, warning_samples, progress_callback
-    )
+    storage._report_transfer_candidate_summary(summary, warning_samples, progress_callback)
 
     if dir_error:
         if transfer_success_count > 0:

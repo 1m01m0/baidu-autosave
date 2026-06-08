@@ -120,10 +120,7 @@ def record_rename_failure(
     storage, clean_path, final_path, exc, rename_failed_files, progress_callback
 ):
     error_info = classify_storage_error(exc)
-    error_msg = (
-        f"重命名文件失败: {os.path.basename(clean_path)} -> "
-        f"{os.path.basename(final_path)}"
-    )
+    error_msg = f"重命名文件失败: {os.path.basename(clean_path)} -> {os.path.basename(final_path)}"
     if progress_callback:
         progress_callback("error", f"{error_msg}: {error_info.message}")
     handle_error_and_notify(

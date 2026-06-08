@@ -55,9 +55,7 @@ def error_to_text(error: ErrorLike) -> str:
 
 
 def _is_storage_temporary_message(raw_message: str, lowered: str) -> bool:
-    return "存储好像出问题了" in raw_message or (
-        "storage" in lowered and "try again" in lowered
-    )
+    return "存储好像出问题了" in raw_message or ("storage" in lowered and "try again" in lowered)
 
 
 def _match_error_code(text: str) -> Optional[str]:
@@ -261,9 +259,7 @@ def is_storage_temporary_error_info(error_info: StorageErrorInfo) -> bool:
     return (
         error_info.code == "4"
         and error_info.retryable
-        and _is_storage_temporary_message(
-            error_info.raw_message, error_info.raw_message.lower()
-        )
+        and _is_storage_temporary_message(error_info.raw_message, error_info.raw_message.lower())
     )
 
 

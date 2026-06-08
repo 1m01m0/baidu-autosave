@@ -161,11 +161,7 @@ class TransferResultBuilder:
 
     def build(self):
         self._ensure_not_built()
-        success = (
-            not self._partial
-            and self._error_details is None
-            and not self._failed_files
-        )
+        success = not self._partial and self._error_details is None and not self._failed_files
         result = TransferResult(
             success=success,
             partial=self._partial,

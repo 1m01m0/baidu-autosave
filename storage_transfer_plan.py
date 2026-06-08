@@ -29,9 +29,7 @@ def execute_transfer_plan(
     progress_callback=None,
 ):
     if progress_callback:
-        progress_callback(
-            "info", f"【步骤4/4】开始执行转存操作，共 {len(transfer_list)} 个文件"
-        )
+        progress_callback("info", f"【步骤4/4】开始执行转存操作，共 {len(transfer_list)} 个文件")
 
     def build_entries(items, batch_size):
         grouped_transfer_items = {}
@@ -138,9 +136,7 @@ def execute_transfer_plan(
                                 f"{dir_path} ({len(batch_items)} 个文件)",
                             )
                         add_pending_items(next_pending, batch_items)
-                        add_remaining_entries(
-                            next_pending, grouped_transfer_entries[index + 1 :]
-                        )
+                        add_remaining_entries(next_pending, grouped_transfer_entries[index + 1 :])
                         batch_size_reduced = True
                         final_error = None
                         break
@@ -196,9 +192,7 @@ def execute_transfer_plan(
                         )
                         if force_refresh:
                             local_files_cache_dirty = False
-                        missing_keys = {
-                            storage._transfer_item_key(item) for item in missing_items
-                        }
+                        missing_keys = {storage._transfer_item_key(item) for item in missing_items}
                         for item in batch_items:
                             if storage._transfer_item_key(item) not in missing_keys:
                                 failed_records.pop(storage._transfer_item_key(item), None)

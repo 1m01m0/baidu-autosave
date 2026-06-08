@@ -127,9 +127,7 @@ class WeChatNotifier:
         connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
         read_timeout: float = DEFAULT_READ_TIMEOUT,
         timezone: ZoneInfo = DEFAULT_TIMEZONE,
-        github_context_provider: Optional[
-            Callable[[], Optional[GitHubActionsContext]]
-        ] = None,
+        github_context_provider: Optional[Callable[[], Optional[GitHubActionsContext]]] = None,
     ) -> None:
         self.webhook_url = webhook_url
         self.max_retries = max_retries
@@ -194,9 +192,7 @@ class WeChatNotifier:
         """根据转存结果发送通知。"""
         save_dir = self._get_save_dir(config)
         total_count = result.get("total_count", 1)
-        task_desc = (
-            f"批量转存任务 ({total_count}个链接)" if total_count > 1 else "转存任务"
-        )
+        task_desc = f"批量转存任务 ({total_count}个链接)" if total_count > 1 else "转存任务"
 
         if result.get("success"):
             return self._send_success_or_skipped_report(result, task_desc, save_dir)
@@ -204,9 +200,7 @@ class WeChatNotifier:
             return self._send_partial_report(result, task_desc, save_dir)
         return self._send_failure_report(result, task_desc, save_dir)
 
-    def send_error_notification(
-        self, error_msg: str, config: Optional[Dict[str, Any]]
-    ) -> bool:
+    def send_error_notification(self, error_msg: str, config: Optional[Dict[str, Any]]) -> bool:
         """发送系统级异常通知，自动附带 GitHub Actions 元数据。"""
         save_dir = self._get_save_dir(config)
         masked_error = self._mask_sensitive(error_msg) or error_msg
@@ -247,9 +241,7 @@ class WeChatNotifier:
         self, result: Dict[str, Any], task_desc: str, save_dir: str
     ) -> bool:
         if result.get("skipped"):
-            result_msg = result.get("message") or result.get(
-                "summary", "没有新文件需要转存"
-            )
+            result_msg = result.get("message") or result.get("summary", "没有新文件需要转存")
             message = self._render_report(
                 heading="## 📋 百度网盘转存报告",
                 fields=[
@@ -298,24 +290,18 @@ class WeChatNotifier:
         transfer_failed_block = self._format_files_block(
             "转存失败",
             result.get("transfer_failed_files", []),
-            lambda item: (
-                f"{item.get('final_path') or item.get('clean_path')}: "
-                f"{item.get('error')}"
-            ),
+            lambda item: f"{item.get('final_path') or item.get('clean_path')}: {item.get('error')}",
         )
         rename_failed_block = self._format_files_block(
             "重命名失败",
             result.get("rename_failed_files", []),
             lambda item: (
-                f"{item.get('source_path')} -> {item.get('target_path')}: "
-                f"{item.get('error')}"
+                f"{item.get('source_path')} -> {item.get('target_path')}: {item.get('error')}"
             ),
         )
         return [block for block in (transfer_failed_block, rename_failed_block) if block]
 
-    def _send_partial_report(
-        self, result: Dict[str, Any], task_desc: str, save_dir: str
-    ) -> bool:
+    def _send_partial_report(self, result: Dict[str, Any], task_desc: str, save_dir: str) -> bool:
         error_msg = result.get("error", "部分转存成功")
         sections = self._failed_file_sections(result)
         sections.extend(self._operational_warning_sections(result))
@@ -332,9 +318,7 @@ class WeChatNotifier:
         )
         return self.send_message(message, "markdown")
 
-    def _send_failure_report(
-        self, result: Dict[str, Any], task_desc: str, save_dir: str
-    ) -> bool:
+    def _send_failure_report(self, result: Dict[str, Any], task_desc: str, save_dir: str) -> bool:
         error_msg = result.get("error", "未知错误")
         sections = self._failed_file_sections(result)
         sections.extend(self._operational_warning_sections(result))
@@ -365,7 +349,9 @@ class WeChatNotifier:
         for section in extra_sections or []:
             if not section:
                 continue
-            result = f"{result}\n{section}" if not section.startswith("\n") else f"{result}{section}"
+            result = (
+                f"{result}\n{section}" if not section.startswith("\n") else f"{result}{section}"
+            )
         return result
 
     def _render_github_actions_block(self) -> str:

@@ -220,9 +220,7 @@ def send_wechat_alert(
     try:
         wechat_notifier.send_error_notification(format_error_info(error, context), config)
     except Exception as exc:  # pragma: no cover - 发送失败不再回流给自身
-        _emit_error_log(
-            f"发送企业微信告警失败: {type(exc).__name__}: {exc}"
-        )
+        _emit_error_log(f"发送企业微信告警失败: {type(exc).__name__}: {exc}")
 
 
 # ============================================================================
@@ -319,9 +317,7 @@ def _format_aggregate_message(frame: _CollectionFrame) -> Optional[str]:
     return "\n".join(parts).strip()
 
 
-def send_collected_errors(
-    wechat_notifier: Any, config: Optional[Dict[str, Any]] = None
-) -> None:
+def send_collected_errors(wechat_notifier: Any, config: Optional[Dict[str, Any]] = None) -> None:
     """发送当前栈顶帧聚合后的错误（仅发送本层，外层不受影响）。"""
     if wechat_notifier is None:
         return
@@ -441,9 +437,7 @@ def error_collection(
     suppress: bool = False,
 ):
     """``ErrorCollector`` 的函数式包装，便于 with 语法使用。"""
-    with ErrorCollector(
-        context, wechat_notifier, config, auto_send, suppress
-    ) as collector:
+    with ErrorCollector(context, wechat_notifier, config, auto_send, suppress) as collector:
         yield collector
 
 

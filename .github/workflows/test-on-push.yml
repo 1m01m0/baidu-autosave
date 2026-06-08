@@ -50,7 +50,8 @@ jobs:
     - name: Run quality and security checks
       run: |
         python -m compileall -q -x 'vendor/' .
-        python -m ruff check . --exclude vendor --select E9,F63,F7,F82
+        python -m ruff check .
+        python -m ruff format --check .
         python -m pip check
         python -m pip_audit -r requirements.txt -r requirements-test.txt -r requirements-quality.txt
 

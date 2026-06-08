@@ -109,13 +109,18 @@ class DirTreeTraverserTest(unittest.TestCase):
             path_service,
             share_service,
             executor,
-            ProgressReporter(
-                lambda level, message: progress_messages.append((level, message))
-            ),
+            ProgressReporter(lambda level, message: progress_messages.append((level, message))),
             notify_error,
             batch_size=batch_size,
         )
-        return traverser, path_service, share_service, executor, progress_messages, error_notifications
+        return (
+            traverser,
+            path_service,
+            share_service,
+            executor,
+            progress_messages,
+            error_notifications,
+        )
 
     def file_child(self, parent_path, name, fs_id, md5=None):
         return {
@@ -155,9 +160,7 @@ class DirTreeTraverserTest(unittest.TestCase):
             children_by_path[path] = [child]
             path = child["path"]
         children_by_path[path] = [self.file_child(path, "file.txt", 999, "md5-file")]
-        traverser, _, _, executor, _, error_notifications = self.make_traverser(
-            children_by_path
-        )
+        traverser, _, _, executor, _, error_notifications = self.make_traverser(children_by_path)
         old_limit = sys.getrecursionlimit()
 
         try:
@@ -172,9 +175,7 @@ class DirTreeTraverserTest(unittest.TestCase):
         finally:
             sys.setrecursionlimit(old_limit)
 
-        expected_target_dir = "/save/course/" + "/".join(
-            f"d{index}" for index in range(depth)
-        )
+        expected_target_dir = "/save/course/" + "/".join(f"d{index}" for index in range(depth))
         first_batch = executor.transfer_plan_batches[0]
         items = first_batch["items"]
         self.assertTrue(result["success"])
@@ -213,10 +214,7 @@ class DirTreeTraverserTest(unittest.TestCase):
         )
         self.assertEqual(
             [[1, 2], [3, 4], [5]],
-            [
-                [item.fs_id for item in batch["items"]]
-                for batch in executor.transfer_plan_batches
-            ],
+            [[item.fs_id for item in batch["items"]] for batch in executor.transfer_plan_batches],
         )
         self.assertEqual([], error_notifications)
 
@@ -229,12 +227,8 @@ class DirTreeTraverserTest(unittest.TestCase):
         def children():
             for fs_id in range(1, batch_size + 1):
                 yield self.file_child("/share/course", f"{fs_id}.txt", fs_id)
-            call_counts_after_full_batch.append(
-                len(executor_ref["executor"].transfer_plan_batches)
-            )
-            yield self.file_child(
-                "/share/course", f"{batch_size + 1}.txt", batch_size + 1
-            )
+            call_counts_after_full_batch.append(len(executor_ref["executor"].transfer_plan_batches))
+            yield self.file_child("/share/course", f"{batch_size + 1}.txt", batch_size + 1)
 
         traverser, _, _, executor, _, error_notifications = self.make_traverser(
             {"/share/course": children}, batch_size=batch_size
@@ -272,9 +266,7 @@ class DirTreeTraverserTest(unittest.TestCase):
             None,
         )
 
-        self.assertEqual(
-            "md5-a", getattr(executor.transfer_plan_batches[0]["items"][0], "src_md5")
-        )
+        self.assertEqual("md5-a", getattr(executor.transfer_plan_batches[0]["items"][0], "src_md5"))
         self.assertEqual([], error_notifications)
 
     def test_excluded_folder_is_skipped(self):
@@ -286,9 +278,7 @@ class DirTreeTraverserTest(unittest.TestCase):
             executor,
             progress_messages,
             error_notifications,
-        ) = self.make_traverser(
-            {"/share/course": [self.dir_child("/share/course", "skip", 20)]}
-        )
+        ) = self.make_traverser({"/share/course": [self.dir_child("/share/course", "skip", 20)]})
 
         result = traverser.traverse(
             shared_dir,
@@ -396,9 +386,7 @@ class DirTreeTraverserTest(unittest.TestCase):
             [("/share/course", 1, 2, "token"), ("/share/course/big", 1, 2, "token")],
             share_service.calls,
         )
-        self.assertEqual(
-            ["/save/course", "/save/course/big"], path_service.ensured_dirs
-        )
+        self.assertEqual(["/save/course", "/save/course/big"], path_service.ensured_dirs)
         self.assertIn(("warning", "子目录超量，继续拆分: big"), progress_messages)
         self.assertEqual("/save/course/big", first_batch["target_dir"])
         self.assertEqual("/save/course/big", items[0].dir_path)
@@ -421,9 +409,7 @@ class DirTreeTraverserTest(unittest.TestCase):
             executor,
             progress_messages,
             error_notifications,
-        ) = self.make_traverser(
-            children_by_path, failing_dirs={"/save/course/big"}
-        )
+        ) = self.make_traverser(children_by_path, failing_dirs={"/save/course/big"})
         executor.group_side_effects.append(
             RuntimeError("error_code: -33, message: 一次支持操作999个")
         )

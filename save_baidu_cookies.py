@@ -29,10 +29,10 @@
 
 import argparse
 import json
-import re
 import subprocess
 import sys
 import time
+from importlib.util import find_spec
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable, Optional, Tuple, Dict
 
@@ -57,12 +57,7 @@ if TYPE_CHECKING:
     except ImportError:
         pass  # Optional dependency
 
-try:
-    from playwright.sync_api import sync_playwright, BrowserContext  # type: ignore
-
-    PLAYWRIGHT_AVAILABLE = True
-except Exception:
-    PLAYWRIGHT_AVAILABLE = False
+PLAYWRIGHT_AVAILABLE = find_spec("playwright.sync_api") is not None
 
 USER_DATA_DIR = str(Path.home() / ".baidu_pan_profile")  # 持久化用户目录
 OUTPUT_ENV = "baidu_cookies.env"  # 输出 env 片段文件
@@ -114,9 +109,7 @@ def _require_config_value(config: Dict, key: str, empty_message: str) -> str:
 def update_secret_shareurl_from_config(repo: str, name: str):
     """从 config.json 读取 share_urls 并写入 GitHub Secrets"""
     config = load_config()
-    share_urls = build_share_urls_text(
-        config.get("share_urls"), config.get("save_dir")
-    )
+    share_urls = build_share_urls_text(config.get("share_urls"), config.get("save_dir"))
     if not share_urls:
         print("配置文件中未找到 share_urls")
         sys.exit(1)
@@ -132,9 +125,7 @@ def update_secret_cookie_from_config(repo: str, name: str):
     set_secret(repo, name, cookies)
 
 
-def find_cookie(
-    cookies: Iterable[dict], name: str, domains=PREFERRED_DOMAINS
-) -> Optional[str]:
+def find_cookie(cookies: Iterable[dict], name: str, domains=PREFERRED_DOMAINS) -> Optional[str]:
     """在 cookies 集合中查找指定名称且域名匹配的 cookie 值"""
     best_value = None
     best_rank = -1
@@ -311,9 +302,7 @@ def read_env_values(env_path: Path) -> Dict[str, str]:
 def write_env_file(env_path: Path, cookies_min: str, cookies_full: str) -> None:
     """将 cookies 写入 env 文件，带错误处理"""
     try:
-        content = (
-            f'BAIDU_COOKIES="{cookies_min}"\nBAIDU_COOKIES_FULL="{cookies_full}"\n'
-        )
+        content = f'BAIDU_COOKIES="{cookies_min}"\nBAIDU_COOKIES_FULL="{cookies_full}"\n'
         env_path.write_text(content, encoding="utf-8")
         env_path.chmod(0o600)
         print(f"✅ Cookies 已写入: {env_path}")
@@ -355,9 +344,7 @@ def do_browser_login_and_extract(
         raise RuntimeError("Playwright 未安装") from None
 
     print("即将启动浏览器，请在弹出窗口中完成百度网盘登录（可扫码登录）。")
-    print(
-        "登录成功后脚本会自动抓取 Cookie（含 BDUSS/STOKEN 及全部 Cookie）。最多等待 10 分钟..."
-    )
+    print("登录成功后脚本会自动抓取 Cookie（含 BDUSS/STOKEN 及全部 Cookie）。最多等待 10 分钟...")
 
     try:
         with sync_playwright() as p:
@@ -369,16 +356,12 @@ def do_browser_login_and_extract(
             page = ctx.new_page()
             page.goto(LOGIN_URL, wait_until="load")
 
-            bduss, stoken, cookies = wait_for_cookies(
-                ctx, timeout_sec=600, status_callback=print
-            )
+            bduss, stoken, cookies = wait_for_cookies(ctx, timeout_sec=600, status_callback=print)
 
             # 即使未获取到最小必需项，也构建全量 Cookie
             cookie_map = build_cookie_map(cookies)
             cookies_full_str = build_cookie_string(cookie_map)
-            cookies_min_str = (
-                f"BDUSS={bduss}; STOKEN={stoken}" if bduss and stoken else ""
-            )
+            cookies_min_str = f"BDUSS={bduss}; STOKEN={stoken}" if bduss and stoken else ""
 
             if not (bduss and stoken):
                 print("\n⚠️  未能获取到完整的最小必需 Cookie（BDUSS/STOKEN）。")

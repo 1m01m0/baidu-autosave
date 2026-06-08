@@ -29,9 +29,7 @@ BATCH_SHARE_DELAY = read_non_negative_float_env("TRANSFERSHARE_BATCH_SHARE_DELAY
 # 多链接并发执行的 worker 数。默认 1（串行），>1 时让多个独立分享的转存
 # 流水线重叠执行。注意：百度对同一账号有 list/transfer 限频，并发过高会
 # 触发 error_code: -65；建议从 2 起步实测，推荐上限 4。
-MULTI_SHARE_CONCURRENCY = read_positive_int_env(
-    "TRANSFERSHARE_MULTI_SHARE_CONCURRENCY", 1
-)
+MULTI_SHARE_CONCURRENCY = read_positive_int_env("TRANSFERSHARE_MULTI_SHARE_CONCURRENCY", 1)
 
 # 单次 transfer 调用打包的最大 fs_id 数量。
 TRANSFER_BATCH_SIZE = read_positive_int_env("TRANSFERSHARE_TRANSFER_BATCH_SIZE", 999)
@@ -54,9 +52,7 @@ STREAM_PRODUCER_JOIN_TIMEOUT = read_non_negative_float_env(
 # Streaming 路径上的"扫描-转存"双缓冲开关。默认启用：把 _execute_transfer_plan
 # 调用丢给单个 worker 线程异步执行，主线程立即回去消费扫描队列，从而让网络
 # 调用与后续扫描重叠。worker 数固定为 1，避免对同一账号触发并发转存限频。
-TRANSFER_PIPELINE_ENABLED = read_positive_int_env(
-    "TRANSFERSHARE_TRANSFER_PIPELINE", 1
-) >= 1
+TRANSFER_PIPELINE_ENABLED = read_positive_int_env("TRANSFERSHARE_TRANSFER_PIPELINE", 1) >= 1
 
 
 __all__ = [

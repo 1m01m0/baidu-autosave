@@ -29,8 +29,12 @@ class TransferRunnerSmokeTests(unittest.TestCase):
             "config_path": "config.json",
             "cookies": "BDUSS=foo; STOKEN=bar",
             "wechat_webhook": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test",
-            "share_urls": [{"share_url": "https://pan.baidu.com/s/abc12345", "save_dir": "/AutoTransfer"}],
-            "share_configs": [{"share_url": "https://pan.baidu.com/s/abc12345", "save_dir": "/AutoTransfer"}],
+            "share_urls": [
+                {"share_url": "https://pan.baidu.com/s/abc12345", "save_dir": "/AutoTransfer"}
+            ],
+            "share_configs": [
+                {"share_url": "https://pan.baidu.com/s/abc12345", "save_dir": "/AutoTransfer"}
+            ],
         }
         result = {
             "success": True,
@@ -45,17 +49,17 @@ class TransferRunnerSmokeTests(unittest.TestCase):
         fake_notifier.send_transfer_result.return_value = True
         fake_logger = Mock()
 
-        with patch.object(transfer_runner, "setup_logging"), patch.object(
-            transfer_runner, "get_logger", return_value=fake_logger
-        ), patch.object(transfer_runner, "log_startup"), patch.object(
-            transfer_runner, "log_config_loaded"
-        ), patch.object(transfer_runner, "check_network_connectivity"), patch.object(
-            transfer_runner, "load_runtime_config", return_value=config
-        ), patch.object(
-            transfer_runner, "WeChatNotifier", return_value=fake_notifier
-        ), patch.object(
-            transfer_runner, "BaiduStorage", return_value=fake_storage
-        ), patch.object(transfer_runner, "log_shutdown") as mock_shutdown:
+        with (
+            patch.object(transfer_runner, "setup_logging"),
+            patch.object(transfer_runner, "get_logger", return_value=fake_logger),
+            patch.object(transfer_runner, "log_startup"),
+            patch.object(transfer_runner, "log_config_loaded"),
+            patch.object(transfer_runner, "check_network_connectivity"),
+            patch.object(transfer_runner, "load_runtime_config", return_value=config),
+            patch.object(transfer_runner, "WeChatNotifier", return_value=fake_notifier),
+            patch.object(transfer_runner, "BaiduStorage", return_value=fake_storage),
+            patch.object(transfer_runner, "log_shutdown") as mock_shutdown,
+        ):
             transfer_runner.main()
 
         fake_storage.transfer_multiple_shares.assert_called_once_with(
@@ -68,21 +72,20 @@ class TransferRunnerSmokeTests(unittest.TestCase):
     def test_main_exits_when_load_runtime_config_raises_validation_error(self):
         fake_logger = Mock()
 
-        with patch.object(transfer_runner, "setup_logging"), patch.object(
-            transfer_runner, "get_logger", return_value=fake_logger
-        ), patch.object(transfer_runner, "log_startup"), patch.object(
-            transfer_runner, "check_network_connectivity"
-        ), patch.object(
-            transfer_runner,
-            "load_runtime_config",
-            side_effect=ValueError("配置校验失败: bad config"),
-        ), patch.object(
-            transfer_runner, "handle_error_and_notify"
-        ) as mock_handle_error, patch.object(
-            transfer_runner.sys, "exit", side_effect=SystemExit(1)
-        ), patch.object(
-            transfer_runner, "log_shutdown"
-        ) as mock_shutdown:
+        with (
+            patch.object(transfer_runner, "setup_logging"),
+            patch.object(transfer_runner, "get_logger", return_value=fake_logger),
+            patch.object(transfer_runner, "log_startup"),
+            patch.object(transfer_runner, "check_network_connectivity"),
+            patch.object(
+                transfer_runner,
+                "load_runtime_config",
+                side_effect=ValueError("配置校验失败: bad config"),
+            ),
+            patch.object(transfer_runner, "handle_error_and_notify") as mock_handle_error,
+            patch.object(transfer_runner.sys, "exit", side_effect=SystemExit(1)),
+            patch.object(transfer_runner, "log_shutdown") as mock_shutdown,
+        ):
             with self.assertRaises(SystemExit) as cm:
                 transfer_runner.main()
 
@@ -137,8 +140,12 @@ class TransferRunnerSmokeTests(unittest.TestCase):
             "config_path": "config.json",
             "cookies": "BDUSS=foo; STOKEN=bar",
             "wechat_webhook": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test",
-            "share_urls": [{"share_url": "https://pan.baidu.com/s/abc12345", "save_dir": "/AutoTransfer"}],
-            "share_configs": [{"share_url": "https://pan.baidu.com/s/abc12345", "save_dir": "/AutoTransfer"}],
+            "share_urls": [
+                {"share_url": "https://pan.baidu.com/s/abc12345", "save_dir": "/AutoTransfer"}
+            ],
+            "share_configs": [
+                {"share_url": "https://pan.baidu.com/s/abc12345", "save_dir": "/AutoTransfer"}
+            ],
         }
         result = {"success": False, "error": "失败"}
         fake_storage = Mock()
@@ -149,19 +156,18 @@ class TransferRunnerSmokeTests(unittest.TestCase):
         fake_notifier.send_transfer_result.return_value = True
         fake_logger = Mock()
 
-        with patch.object(transfer_runner, "setup_logging"), patch.object(
-            transfer_runner, "get_logger", return_value=fake_logger
-        ), patch.object(transfer_runner, "log_startup"), patch.object(
-            transfer_runner, "log_config_loaded"
-        ), patch.object(transfer_runner, "check_network_connectivity"), patch.object(
-            transfer_runner, "load_runtime_config", return_value=config
-        ), patch.object(
-            transfer_runner, "WeChatNotifier", return_value=fake_notifier
-        ), patch.object(
-            transfer_runner, "BaiduStorage", return_value=fake_storage
-        ), patch.object(transfer_runner.sys, "exit", side_effect=SystemExit(1)), patch.object(
-            transfer_runner, "log_shutdown"
-        ) as mock_shutdown:
+        with (
+            patch.object(transfer_runner, "setup_logging"),
+            patch.object(transfer_runner, "get_logger", return_value=fake_logger),
+            patch.object(transfer_runner, "log_startup"),
+            patch.object(transfer_runner, "log_config_loaded"),
+            patch.object(transfer_runner, "check_network_connectivity"),
+            patch.object(transfer_runner, "load_runtime_config", return_value=config),
+            patch.object(transfer_runner, "WeChatNotifier", return_value=fake_notifier),
+            patch.object(transfer_runner, "BaiduStorage", return_value=fake_storage),
+            patch.object(transfer_runner.sys, "exit", side_effect=SystemExit(1)),
+            patch.object(transfer_runner, "log_shutdown") as mock_shutdown,
+        ):
             with self.assertRaises(SystemExit) as cm:
                 transfer_runner.main()
 
@@ -175,8 +181,12 @@ class TransferRunnerSmokeTests(unittest.TestCase):
             "config_path": "config.json",
             "cookies": "BDUSS=foo; STOKEN=bar",
             "wechat_webhook": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test",
-            "share_urls": [{"share_url": "https://pan.baidu.com/s/abc12345", "save_dir": "/AutoTransfer"}],
-            "share_configs": [{"share_url": "https://pan.baidu.com/s/abc12345", "save_dir": "/AutoTransfer"}],
+            "share_urls": [
+                {"share_url": "https://pan.baidu.com/s/abc12345", "save_dir": "/AutoTransfer"}
+            ],
+            "share_configs": [
+                {"share_url": "https://pan.baidu.com/s/abc12345", "save_dir": "/AutoTransfer"}
+            ],
         }
         result = {
             "success": False,
@@ -194,19 +204,18 @@ class TransferRunnerSmokeTests(unittest.TestCase):
         fake_notifier.send_transfer_result.return_value = True
         fake_logger = Mock()
 
-        with patch.object(transfer_runner, "setup_logging"), patch.object(
-            transfer_runner, "get_logger", return_value=fake_logger
-        ), patch.object(transfer_runner, "log_startup"), patch.object(
-            transfer_runner, "log_config_loaded"
-        ), patch.object(transfer_runner, "check_network_connectivity"), patch.object(
-            transfer_runner, "load_runtime_config", return_value=config
-        ), patch.object(
-            transfer_runner, "WeChatNotifier", return_value=fake_notifier
-        ), patch.object(
-            transfer_runner, "BaiduStorage", return_value=fake_storage
-        ), patch.object(transfer_runner.sys, "exit", side_effect=SystemExit(1)), patch.object(
-            transfer_runner, "log_shutdown"
-        ) as mock_shutdown:
+        with (
+            patch.object(transfer_runner, "setup_logging"),
+            patch.object(transfer_runner, "get_logger", return_value=fake_logger),
+            patch.object(transfer_runner, "log_startup"),
+            patch.object(transfer_runner, "log_config_loaded"),
+            patch.object(transfer_runner, "check_network_connectivity"),
+            patch.object(transfer_runner, "load_runtime_config", return_value=config),
+            patch.object(transfer_runner, "WeChatNotifier", return_value=fake_notifier),
+            patch.object(transfer_runner, "BaiduStorage", return_value=fake_storage),
+            patch.object(transfer_runner.sys, "exit", side_effect=SystemExit(1)),
+            patch.object(transfer_runner, "log_shutdown") as mock_shutdown,
+        ):
             with self.assertRaises(SystemExit) as cm:
                 transfer_runner.main()
 
@@ -297,7 +306,10 @@ class TransferRunnerSmokeTests(unittest.TestCase):
         result = {
             "results": [
                 {
-                    "retry_config": {"share_url": "https://pan.baidu.com/s/abc12345", "save_dir": "/a"},
+                    "retry_config": {
+                        "share_url": "https://pan.baidu.com/s/abc12345",
+                        "save_dir": "/a",
+                    },
                     "transfer_failed_files": [{"fs_id": 1, "clean_path": "a.txt"}],
                     "error": "boom",
                 }
@@ -575,18 +587,18 @@ class TransferRunnerSmokeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             failed_path = Path(tmpdir) / "failed.json"
             transfer_runner.save_failed_transfer_records([history_record], failed_path)
-            with patch.object(transfer_runner, "FAILED_TRANSFERS_FILE", failed_path), patch.object(
-                transfer_runner, "MAX_FAILED_TRANSFER_ATTEMPTS", 3
-            ), patch.object(transfer_runner, "setup_logging"), patch.object(
-                transfer_runner, "get_logger", return_value=fake_logger
-            ), patch.object(transfer_runner, "log_startup"), patch.object(
-                transfer_runner, "log_config_loaded"
-            ), patch.object(transfer_runner, "check_network_connectivity"), patch.object(
-                transfer_runner, "load_runtime_config", return_value=config
-            ), patch.object(
-                transfer_runner, "BaiduStorage", return_value=fake_storage
-            ), patch.object(transfer_runner.sys, "exit", side_effect=SystemExit(1)) as exit_mock, patch.object(
-                transfer_runner, "log_shutdown"
+            with (
+                patch.object(transfer_runner, "FAILED_TRANSFERS_FILE", failed_path),
+                patch.object(transfer_runner, "MAX_FAILED_TRANSFER_ATTEMPTS", 3),
+                patch.object(transfer_runner, "setup_logging"),
+                patch.object(transfer_runner, "get_logger", return_value=fake_logger),
+                patch.object(transfer_runner, "log_startup"),
+                patch.object(transfer_runner, "log_config_loaded"),
+                patch.object(transfer_runner, "check_network_connectivity"),
+                patch.object(transfer_runner, "load_runtime_config", return_value=config),
+                patch.object(transfer_runner, "BaiduStorage", return_value=fake_storage),
+                patch.object(transfer_runner.sys, "exit", side_effect=SystemExit(1)) as exit_mock,
+                patch.object(transfer_runner, "log_shutdown"),
             ):
                 if expect_exit:
                     with self.assertRaises(SystemExit):
@@ -633,8 +645,12 @@ class TransferRunnerSmokeTests(unittest.TestCase):
             "config_path": "config.json",
             "cookies": "BDUSS=foo; STOKEN=bar",
             "wechat_webhook": "",
-            "share_urls": [{"share_url": "https://pan.baidu.com/s/new12345", "save_dir": "/AutoTransfer"}],
-            "share_configs": [{"share_url": "https://pan.baidu.com/s/new12345", "save_dir": "/AutoTransfer"}],
+            "share_urls": [
+                {"share_url": "https://pan.baidu.com/s/new12345", "save_dir": "/AutoTransfer"}
+            ],
+            "share_configs": [
+                {"share_url": "https://pan.baidu.com/s/new12345", "save_dir": "/AutoTransfer"}
+            ],
         }
         history_config = {"share_url": "https://pan.baidu.com/s/old12345", "save_dir": "/old"}
         fake_storage = Mock()
@@ -652,15 +668,17 @@ class TransferRunnerSmokeTests(unittest.TestCase):
                 [{"share_config": history_config, "failed_files": [], "attempts": 1}],
                 failed_path,
             )
-            with patch.object(transfer_runner, "FAILED_TRANSFERS_FILE", failed_path), patch.object(
-                transfer_runner, "setup_logging"
-            ), patch.object(transfer_runner, "get_logger", return_value=fake_logger), patch.object(
-                transfer_runner, "log_startup"
-            ), patch.object(transfer_runner, "log_config_loaded"), patch.object(
-                transfer_runner, "check_network_connectivity"
-            ), patch.object(transfer_runner, "load_runtime_config", return_value=config), patch.object(
-                transfer_runner, "BaiduStorage", return_value=fake_storage
-            ), patch.object(transfer_runner, "log_shutdown"):
+            with (
+                patch.object(transfer_runner, "FAILED_TRANSFERS_FILE", failed_path),
+                patch.object(transfer_runner, "setup_logging"),
+                patch.object(transfer_runner, "get_logger", return_value=fake_logger),
+                patch.object(transfer_runner, "log_startup"),
+                patch.object(transfer_runner, "log_config_loaded"),
+                patch.object(transfer_runner, "check_network_connectivity"),
+                patch.object(transfer_runner, "load_runtime_config", return_value=config),
+                patch.object(transfer_runner, "BaiduStorage", return_value=fake_storage),
+                patch.object(transfer_runner, "log_shutdown"),
+            ):
                 transfer_runner.main()
 
             self.assertFalse(failed_path.exists())
@@ -680,8 +698,12 @@ class TransferRunnerSmokeTests(unittest.TestCase):
             "config_path": "config.json",
             "cookies": "BDUSS=foo; STOKEN=bar",
             "wechat_webhook": "",
-            "share_urls": [{"share_url": "https://pan.baidu.com/s/new12345", "save_dir": "/AutoTransfer"}],
-            "share_configs": [{"share_url": "https://pan.baidu.com/s/new12345", "save_dir": "/AutoTransfer"}],
+            "share_urls": [
+                {"share_url": "https://pan.baidu.com/s/new12345", "save_dir": "/AutoTransfer"}
+            ],
+            "share_configs": [
+                {"share_url": "https://pan.baidu.com/s/new12345", "save_dir": "/AutoTransfer"}
+            ],
         }
         history_config = {"share_url": "https://pan.baidu.com/s/old12345", "save_dir": "/old"}
         fake_storage = Mock()
@@ -706,17 +728,18 @@ class TransferRunnerSmokeTests(unittest.TestCase):
                 ],
                 failed_path,
             )
-            with patch.object(transfer_runner, "FAILED_TRANSFERS_FILE", failed_path), patch.object(
-                transfer_runner, "MAX_FAILED_TRANSFER_ATTEMPTS", 3
-            ), patch.object(transfer_runner, "setup_logging"), patch.object(
-                transfer_runner, "get_logger", return_value=fake_logger
-            ), patch.object(transfer_runner, "log_startup"), patch.object(
-                transfer_runner, "log_config_loaded"
-            ), patch.object(transfer_runner, "check_network_connectivity"), patch.object(
-                transfer_runner, "load_runtime_config", return_value=config
-            ), patch.object(
-                transfer_runner, "BaiduStorage", return_value=fake_storage
-            ), patch.object(transfer_runner, "log_shutdown"):
+            with (
+                patch.object(transfer_runner, "FAILED_TRANSFERS_FILE", failed_path),
+                patch.object(transfer_runner, "MAX_FAILED_TRANSFER_ATTEMPTS", 3),
+                patch.object(transfer_runner, "setup_logging"),
+                patch.object(transfer_runner, "get_logger", return_value=fake_logger),
+                patch.object(transfer_runner, "log_startup"),
+                patch.object(transfer_runner, "log_config_loaded"),
+                patch.object(transfer_runner, "check_network_connectivity"),
+                patch.object(transfer_runner, "load_runtime_config", return_value=config),
+                patch.object(transfer_runner, "BaiduStorage", return_value=fake_storage),
+                patch.object(transfer_runner, "log_shutdown"),
+            ):
                 transfer_runner.main()
 
             self.assertFalse(failed_path.exists())
@@ -726,8 +749,10 @@ class TransferRunnerSmokeTests(unittest.TestCase):
             progress_callback=transfer_runner.progress_callback,
         )
         self.assertTrue(
-            any("历史失败清单" in call.args[0] and "重试上限" in call.args[0]
-                for call in fake_logger.warning.call_args_list)
+            any(
+                "历史失败清单" in call.args[0] and "重试上限" in call.args[0]
+                for call in fake_logger.warning.call_args_list
+            )
         )
         self.assertFalse(
             any("1a2B" in str(call.args) for call in fake_logger.warning.call_args_list)
@@ -739,8 +764,12 @@ class TransferRunnerSmokeTests(unittest.TestCase):
             "config_path": "config.json",
             "cookies": "BDUSS=foo; STOKEN=bar",
             "wechat_webhook": "",
-            "share_urls": [{"share_url": "https://pan.baidu.com/s/new12345", "save_dir": "/AutoTransfer"}],
-            "share_configs": [{"share_url": "https://pan.baidu.com/s/new12345", "save_dir": "/AutoTransfer"}],
+            "share_urls": [
+                {"share_url": "https://pan.baidu.com/s/new12345", "save_dir": "/AutoTransfer"}
+            ],
+            "share_configs": [
+                {"share_url": "https://pan.baidu.com/s/new12345", "save_dir": "/AutoTransfer"}
+            ],
         }
         history_config = {"share_url": "https://pan.baidu.com/s/old12345", "save_dir": "/old"}
         fake_storage = Mock()
@@ -766,15 +795,17 @@ class TransferRunnerSmokeTests(unittest.TestCase):
                 ],
                 failed_path,
             )
-            with patch.object(transfer_runner, "FAILED_TRANSFERS_FILE", failed_path), patch.object(
-                transfer_runner, "setup_logging"
-            ), patch.object(transfer_runner, "get_logger", return_value=fake_logger), patch.object(
-                transfer_runner, "log_startup"
-            ), patch.object(transfer_runner, "log_config_loaded"), patch.object(
-                transfer_runner, "check_network_connectivity"
-            ), patch.object(transfer_runner, "load_runtime_config", return_value=config), patch.object(
-                transfer_runner, "BaiduStorage", return_value=fake_storage
-            ), patch.object(transfer_runner, "log_shutdown"):
+            with (
+                patch.object(transfer_runner, "FAILED_TRANSFERS_FILE", failed_path),
+                patch.object(transfer_runner, "setup_logging"),
+                patch.object(transfer_runner, "get_logger", return_value=fake_logger),
+                patch.object(transfer_runner, "log_startup"),
+                patch.object(transfer_runner, "log_config_loaded"),
+                patch.object(transfer_runner, "check_network_connectivity"),
+                patch.object(transfer_runner, "load_runtime_config", return_value=config),
+                patch.object(transfer_runner, "BaiduStorage", return_value=fake_storage),
+                patch.object(transfer_runner, "log_shutdown"),
+            ):
                 transfer_runner.main()
 
             self.assertFalse(failed_path.exists())
@@ -794,7 +825,9 @@ class TransferRunnerSmokeTests(unittest.TestCase):
             "cookies": "BDUSS=foo; STOKEN=bar",
             "wechat_webhook": "",
             "share_urls": [{"share_url": "https://pan.baidu.com/s/old12345", "save_dir": "/old"}],
-            "share_configs": [{"share_url": "https://pan.baidu.com/s/old12345", "save_dir": "/old"}],
+            "share_configs": [
+                {"share_url": "https://pan.baidu.com/s/old12345", "save_dir": "/old"}
+            ],
         }
         history_config = config["share_configs"][0]
         retry_result = {
@@ -822,17 +855,18 @@ class TransferRunnerSmokeTests(unittest.TestCase):
                 [{"share_config": history_config, "failed_files": [], "attempts": 2}],
                 failed_path,
             )
-            with patch.object(transfer_runner, "FAILED_TRANSFERS_FILE", failed_path), patch.object(
-                transfer_runner, "MAX_FAILED_TRANSFER_ATTEMPTS", 3
-            ), patch.object(transfer_runner, "setup_logging"), patch.object(
-                transfer_runner, "get_logger", return_value=fake_logger
-            ), patch.object(transfer_runner, "log_startup"), patch.object(
-                transfer_runner, "log_config_loaded"
-            ), patch.object(transfer_runner, "check_network_connectivity"), patch.object(
-                transfer_runner, "load_runtime_config", return_value=config
-            ), patch.object(
-                transfer_runner, "BaiduStorage", return_value=fake_storage
-            ), patch.object(transfer_runner, "log_shutdown"):
+            with (
+                patch.object(transfer_runner, "FAILED_TRANSFERS_FILE", failed_path),
+                patch.object(transfer_runner, "MAX_FAILED_TRANSFER_ATTEMPTS", 3),
+                patch.object(transfer_runner, "setup_logging"),
+                patch.object(transfer_runner, "get_logger", return_value=fake_logger),
+                patch.object(transfer_runner, "log_startup"),
+                patch.object(transfer_runner, "log_config_loaded"),
+                patch.object(transfer_runner, "check_network_connectivity"),
+                patch.object(transfer_runner, "load_runtime_config", return_value=config),
+                patch.object(transfer_runner, "BaiduStorage", return_value=fake_storage),
+                patch.object(transfer_runner, "log_shutdown"),
+            ):
                 transfer_runner.main()
 
             self.assertFalse(failed_path.exists())
@@ -851,8 +885,12 @@ class TransferRunnerSmokeTests(unittest.TestCase):
             "config_path": "config.json",
             "cookies": "BDUSS=foo; STOKEN=bar",
             "wechat_webhook": "",
-            "share_urls": [{"share_url": "https://pan.baidu.com/s/new12345", "save_dir": "/AutoTransfer"}],
-            "share_configs": [{"share_url": "https://pan.baidu.com/s/new12345", "save_dir": "/AutoTransfer"}],
+            "share_urls": [
+                {"share_url": "https://pan.baidu.com/s/new12345", "save_dir": "/AutoTransfer"}
+            ],
+            "share_configs": [
+                {"share_url": "https://pan.baidu.com/s/new12345", "save_dir": "/AutoTransfer"}
+            ],
         }
         history_config = {"share_url": "https://pan.baidu.com/s/old12345", "save_dir": "/old"}
         retry_result = {
@@ -883,25 +921,28 @@ class TransferRunnerSmokeTests(unittest.TestCase):
                 [{"share_config": history_config, "failed_files": [], "attempts": 2}],
                 failed_path,
             )
-            with patch.object(transfer_runner, "FAILED_TRANSFERS_FILE", failed_path), patch.object(
-                transfer_runner, "MAX_FAILED_TRANSFER_ATTEMPTS", 3
-            ), patch.object(transfer_runner, "setup_logging"), patch.object(
-                transfer_runner, "get_logger", return_value=fake_logger
-            ), patch.object(transfer_runner, "log_startup"), patch.object(
-                transfer_runner, "log_config_loaded"
-            ), patch.object(transfer_runner, "check_network_connectivity"), patch.object(
-                transfer_runner, "load_runtime_config", return_value=config
-            ), patch.object(
-                transfer_runner, "BaiduStorage", return_value=fake_storage
-            ), patch.object(transfer_runner, "log_shutdown"):
+            with (
+                patch.object(transfer_runner, "FAILED_TRANSFERS_FILE", failed_path),
+                patch.object(transfer_runner, "MAX_FAILED_TRANSFER_ATTEMPTS", 3),
+                patch.object(transfer_runner, "setup_logging"),
+                patch.object(transfer_runner, "get_logger", return_value=fake_logger),
+                patch.object(transfer_runner, "log_startup"),
+                patch.object(transfer_runner, "log_config_loaded"),
+                patch.object(transfer_runner, "check_network_connectivity"),
+                patch.object(transfer_runner, "load_runtime_config", return_value=config),
+                patch.object(transfer_runner, "BaiduStorage", return_value=fake_storage),
+                patch.object(transfer_runner, "log_shutdown"),
+            ):
                 transfer_runner.main()
 
             self.assertFalse(failed_path.exists())
 
         self.assertEqual(2, fake_storage.transfer_multiple_shares.call_count)
         self.assertTrue(
-            any("重试后" in call.args[0] and "重试上限" in call.args[0]
-                for call in fake_logger.warning.call_args_list)
+            any(
+                "重试后" in call.args[0] and "重试上限" in call.args[0]
+                for call in fake_logger.warning.call_args_list
+            )
         )
 
     def test_main_saves_current_failed_records(self):
@@ -936,16 +977,17 @@ class TransferRunnerSmokeTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             failed_path = Path(tmpdir) / "failed.json"
-            with patch.object(transfer_runner, "FAILED_TRANSFERS_FILE", failed_path), patch.object(
-                transfer_runner, "setup_logging"
-            ), patch.object(transfer_runner, "get_logger", return_value=fake_logger), patch.object(
-                transfer_runner, "log_startup"
-            ), patch.object(transfer_runner, "log_config_loaded"), patch.object(
-                transfer_runner, "check_network_connectivity"
-            ), patch.object(transfer_runner, "load_runtime_config", return_value=config), patch.object(
-                transfer_runner, "BaiduStorage", return_value=fake_storage
-            ), patch.object(transfer_runner.sys, "exit", side_effect=SystemExit(1)), patch.object(
-                transfer_runner, "log_shutdown"
+            with (
+                patch.object(transfer_runner, "FAILED_TRANSFERS_FILE", failed_path),
+                patch.object(transfer_runner, "setup_logging"),
+                patch.object(transfer_runner, "get_logger", return_value=fake_logger),
+                patch.object(transfer_runner, "log_startup"),
+                patch.object(transfer_runner, "log_config_loaded"),
+                patch.object(transfer_runner, "check_network_connectivity"),
+                patch.object(transfer_runner, "load_runtime_config", return_value=config),
+                patch.object(transfer_runner, "BaiduStorage", return_value=fake_storage),
+                patch.object(transfer_runner.sys, "exit", side_effect=SystemExit(1)),
+                patch.object(transfer_runner, "log_shutdown"),
             ):
                 with self.assertRaises(SystemExit):
                     transfer_runner.main()

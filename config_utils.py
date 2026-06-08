@@ -26,9 +26,7 @@ _SHARE_URL_PATTERN = re.compile(
 )
 _SHARE_PATH_PATTERN = re.compile(r"/s/[A-Za-z0-9_-]+")
 _PWD_VALUE_PATTERN = re.compile(r"[A-Za-z0-9]{4}")
-_PWD_INLINE_PATTERN = re.compile(
-    r"(?:\bpwd\b|密码|提取码)[:：]?\s*([A-Za-z0-9]{4})", re.IGNORECASE
-)
+_PWD_INLINE_PATTERN = re.compile(r"(?:\bpwd\b|密码|提取码)[:：]?\s*([A-Za-z0-9]{4})", re.IGNORECASE)
 _REGEX_BACKREFERENCE_PATTERN = re.compile(r"\\g<[^>]+>|\\[1-9][0-9]*")
 
 
@@ -126,12 +124,8 @@ def normalize_config_aliases(data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     normalized = dict(raw)
     normalized["cookies"] = raw.get("cookies") or raw.get("BAIDU_COOKIES")
     normalized["share_urls"] = raw.get("share_urls") or raw.get("SHARE_URLS")
-    normalized["save_dir"] = (
-        raw.get("save_dir") or raw.get("SAVE_DIR") or DEFAULT_SAVE_DIR
-    )
-    normalized["wechat_webhook"] = raw.get("wechat_webhook") or raw.get(
-        "WECHAT_WEBHOOK"
-    )
+    normalized["save_dir"] = raw.get("save_dir") or raw.get("SAVE_DIR") or DEFAULT_SAVE_DIR
+    normalized["wechat_webhook"] = raw.get("wechat_webhook") or raw.get("WECHAT_WEBHOOK")
     normalized["folder_filter"] = raw.get("folder_filter")
     normalized["exclude_folder_filter"] = raw.get("exclude_folder_filter")
     normalized["regex_pattern"] = raw.get("regex_pattern")
@@ -151,7 +145,9 @@ def load_env_config(env: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
     )
 
 
-def parse_share_links_from_text(text: str, default_save_dir: Optional[str] = None) -> List[Dict[str, Any]]:
+def parse_share_links_from_text(
+    text: str, default_save_dir: Optional[str] = None
+) -> List[Dict[str, Any]]:
     share_configs: List[Dict[str, Any]] = []
     lines = text.strip().split("\n") if text else []
 
@@ -287,9 +283,7 @@ def normalize_share_urls_value(
             raw_count += 1
             if isinstance(item, dict):
                 has_object_item = True
-                share_urls_text_parts.append(
-                    _serialize_share_config(item, default_save_dir)
-                )
+                share_urls_text_parts.append(_serialize_share_config(item, default_save_dir))
             elif isinstance(item, str) and item.strip():
                 share_urls_text_parts.append(item.strip())
 
@@ -308,9 +302,7 @@ def normalize_share_urls_value(
             "raw_count": raw_count,
         }
 
-    raise TypeError(
-        f"share_urls 格式错误，应为列表或字符串，当前类型: {type(share_urls).__name__}"
-    )
+    raise TypeError(f"share_urls 格式错误，应为列表或字符串，当前类型: {type(share_urls).__name__}")
 
 
 def apply_global_share_defaults(
@@ -333,9 +325,7 @@ def apply_global_share_defaults(
     return applied_configs
 
 
-def build_share_urls_text(
-    share_urls: Any, default_save_dir: Optional[str] = None
-) -> str:
+def build_share_urls_text(share_urls: Any, default_save_dir: Optional[str] = None) -> str:
     share_data = normalize_share_urls_value(share_urls, default_save_dir)
     if share_data["share_urls_text"]:
         return share_data["share_urls_text"]
@@ -407,8 +397,7 @@ def _validate_regex_filter_config(
         for idx, pattern in enumerate(value, 1):
             if not isinstance(pattern, str):
                 errors.append(
-                    f"❌ 第 {idx} 个{label}类型错误，应为字符串，"
-                    f"当前类型: {type(pattern).__name__}"
+                    f"❌ 第 {idx} 个{label}类型错误，应为字符串，当前类型: {type(pattern).__name__}"
                 )
                 has_error = True
                 continue
@@ -421,10 +410,7 @@ def _validate_regex_filter_config(
             info_messages.append(f"✅ {label}有效 (共 {len(value)} 个)")
         return
 
-    errors.append(
-        f"❌ {field_name} 类型错误，应为字符串或列表，"
-        f"当前类型: {type(value).__name__}"
-    )
+    errors.append(f"❌ {field_name} 类型错误，应为字符串或列表，当前类型: {type(value).__name__}")
 
 
 def _validate_regex_pattern_config(
@@ -440,9 +426,7 @@ def _validate_regex_pattern_config(
             info_messages.append(optional_message)
         return False
     if not isinstance(value, str):
-        errors.append(
-            f"❌ {field_name} 类型错误，应为字符串，当前类型: {type(value).__name__}"
-        )
+        errors.append(f"❌ {field_name} 类型错误，应为字符串，当前类型: {type(value).__name__}")
         return False
     try:
         re.compile(value)
@@ -465,9 +449,7 @@ def _validate_regex_replace_config(
     if value in (None, ""):
         return
     if not isinstance(value, str):
-        errors.append(
-            f"❌ {field_name} 类型错误，应为字符串，当前类型: {type(value).__name__}"
-        )
+        errors.append(f"❌ {field_name} 类型错误，应为字符串，当前类型: {type(value).__name__}")
         return
     if not _is_safe_regex_replace_template(value):
         errors.append(f"❌ {label}不能生成绝对路径或包含上级目录跳转")
@@ -560,9 +542,7 @@ def validate_runtime_config(config: Dict[str, Any]) -> Dict[str, Any]:
     if not cookies:
         cookie_errors.append("❌ 缺少 cookies 字段 (cookies 或 BAIDU_COOKIES)")
     elif not isinstance(cookies, str):
-        cookie_errors.append(
-            f"❌ cookies 必须是字符串，当前类型: {type(cookies).__name__}"
-        )
+        cookie_errors.append(f"❌ cookies 必须是字符串，当前类型: {type(cookies).__name__}")
     else:
         if "BDUSS" not in cookies:
             cookie_errors.append("❌ Cookies 中缺少 BDUSS")
@@ -603,9 +583,7 @@ def validate_runtime_config(config: Dict[str, Any]) -> Dict[str, Any]:
                 _validate_share_object_config(item, idx, warnings, errors)
             elif isinstance(item, str):
                 if item.strip() and not _SHARE_URL_PATTERN.search(item):
-                    warnings.append(
-                        f"⚠️  第 {idx} 个链接格式可能不正确: {item.strip()[:50]}..."
-                    )
+                    warnings.append(f"⚠️  第 {idx} 个链接格式可能不正确: {item.strip()[:50]}...")
             elif item not in (None, "", []):
                 errors.append(
                     f"❌ 第 {idx} 个链接类型错误，应为字符串或对象，当前类型: {type(item).__name__}"
@@ -613,9 +591,7 @@ def validate_runtime_config(config: Dict[str, Any]) -> Dict[str, Any]:
 
     save_dir = normalized.get("save_dir") or DEFAULT_SAVE_DIR
     if not isinstance(save_dir, str):
-        errors.append(
-            f"❌ save_dir 必须是字符串，当前类型: {type(save_dir).__name__}"
-        )
+        errors.append(f"❌ save_dir 必须是字符串，当前类型: {type(save_dir).__name__}")
     else:
         if not save_dir:
             warnings.append("⚠️  未指定保存目录，将使用默认值: /AutoTransfer")
@@ -627,9 +603,7 @@ def validate_runtime_config(config: Dict[str, Any]) -> Dict[str, Any]:
     if not webhook:
         info_messages.append("ℹ️  未配置企业微信通知 (可选，不影响转存)")
     elif not isinstance(webhook, str):
-        errors.append(
-            f"❌ wechat_webhook 必须是字符串，当前类型: {type(webhook).__name__}"
-        )
+        errors.append(f"❌ wechat_webhook 必须是字符串，当前类型: {type(webhook).__name__}")
     else:
         if "qyapi.weixin.qq.com" not in webhook:
             warnings.append("⚠️  企业微信 Webhook 格式可能不正确")

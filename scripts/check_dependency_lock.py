@@ -130,9 +130,7 @@ def _validate_installed_direct_pins(direct_pins):
             errors.append(f"当前环境未安装直接依赖: {name}")
             continue
         if installed_version != pinned_version:
-            errors.append(
-                f"当前环境中 {name}=={installed_version} 与 pin {pinned_version} 不一致"
-            )
+            errors.append(f"当前环境中 {name}=={installed_version} 与 pin {pinned_version} 不一致")
     return errors
 
 

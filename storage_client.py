@@ -73,9 +73,7 @@ class BaiduClientAdapter:
         self.base_retry_delay = (
             DEFAULT_RETRY_DELAY if self.is_github_actions else DEFAULT_MIN_RETRY_DELAY
         )
-        self.max_retries = (
-            MAX_RETRIES_GITHUB if self.is_github_actions else MAX_RETRIES_LOCAL
-        )
+        self.max_retries = MAX_RETRIES_GITHUB if self.is_github_actions else MAX_RETRIES_LOCAL
         # 会话并发增强相关状态：在 _apply_session_patches 中填充。
         self._session_cookie_lock: Optional[threading.RLock] = None
         self._session_pool_info = self._new_session_pool_info()
@@ -115,9 +113,7 @@ class BaiduClientAdapter:
 
         # fanout 必须 >=1；非法回退到默认并 WARNING
         raw_fanout = os.getenv("TRANSFERSHARE_PCS_POOL_FANOUT")
-        fanout = read_positive_int_env(
-            "TRANSFERSHARE_PCS_POOL_FANOUT", DEFAULT_PCS_POOL_FANOUT
-        )
+        fanout = read_positive_int_env("TRANSFERSHARE_PCS_POOL_FANOUT", DEFAULT_PCS_POOL_FANOUT)
         if raw_fanout is not None and fanout == DEFAULT_PCS_POOL_FANOUT:
             try:
                 if int(raw_fanout) >= 1:
@@ -137,9 +133,7 @@ class BaiduClientAdapter:
         if explicit_maxsize == 0:
             return 0, 0, fanout
 
-        multi_concurrency = read_positive_int_env(
-            "TRANSFERSHARE_MULTI_SHARE_CONCURRENCY", 1
-        )
+        multi_concurrency = read_positive_int_env("TRANSFERSHARE_MULTI_SHARE_CONCURRENCY", 1)
 
         # 显式正数：直接用，不叠加 GA 偏置
         if explicit_maxsize > 0:
@@ -179,17 +173,12 @@ class BaiduClientAdapter:
         logger = get_logger()
         session = getattr(pcs_candidate, "_session", None)
         if not isinstance(session, requests.Session):
-            logger.warning(
-                "pcs_candidate._session 不是 requests.Session 实例，"
-                "跳过连接池调优"
-            )
+            logger.warning("pcs_candidate._session 不是 requests.Session 实例，跳过连接池调优")
             return False
 
         pool_maxsize, pool_connections, fanout = self._compute_pool_maxsize()
         if pool_maxsize == 0:
-            logger.debug(
-                "TRANSFERSHARE_PCS_POOL_MAXSIZE=0，已禁用连接池调优"
-            )
+            logger.debug("TRANSFERSHARE_PCS_POOL_MAXSIZE=0，已禁用连接池调优")
             self._session_pool_info.update(
                 {
                     "pool_maxsize": 0,
@@ -396,9 +385,7 @@ class BaiduClientAdapter:
             adapter = session.adapters.get("https://")
             pools = getattr(getattr(adapter, "poolmanager", None), "pools", None)
             num_pools = len(pools) if pools is not None else -1
-            get_logger().debug(
-                "会话池状态: scheme=https:// num_pools=%s", num_pools
-            )
+            get_logger().debug("会话池状态: scheme=https:// num_pools=%s", num_pools)
         except Exception:  # pragma: no cover - 诊断日志失败不应抛
             pass
 
@@ -410,9 +397,9 @@ class BaiduClientAdapter:
             try:
                 if attempt > 0:
                     if self.is_github_actions:
-                        delay = self.base_retry_delay * (
-                            2 ** (attempt - 1)
-                        ) + random.uniform(0, 1.5)
+                        delay = self.base_retry_delay * (2 ** (attempt - 1)) + random.uniform(
+                            0, 1.5
+                        )
                     else:
                         delay = self.base_retry_delay * attempt
                     delay = min(delay, MAX_RETRY_DELAY)
@@ -428,10 +415,10 @@ class BaiduClientAdapter:
                 error_info = classify_storage_error(exc)
                 if error_info.retryable:
                     if attempt < self.max_retries - 1:
-                        safe_raw_message = mask_sensitive(error_info.raw_message) or error_info.message
-                        logger.debug(
-                            f"可重试请求失败（第{attempt + 1}次尝试）: {safe_raw_message}"
+                        safe_raw_message = (
+                            mask_sensitive(error_info.raw_message) or error_info.message
                         )
+                        logger.debug(f"可重试请求失败（第{attempt + 1}次尝试）: {safe_raw_message}")
                         continue
                     logger.warning(f"可重试请求最终失败，已重试{self.max_retries}次")
                     break
@@ -468,9 +455,7 @@ class BaiduClientAdapter:
                     if retry < 2:
                         time.sleep(3)
                     else:
-                        raise ValueError(
-                            f"百度网盘客户端初始化失败: {str(exc)}"
-                        ) from exc
+                        raise ValueError(f"百度网盘客户端初始化失败: {str(exc)}") from exc
 
     @staticmethod
     def validate_cookies(cookies):
@@ -510,9 +495,7 @@ class BaiduClientAdapter:
         return self.call_with_retry(self.client.makedir, path, suppress_retry_abort=False)
 
     def rename(self, source, target):
-        return self.call_with_retry(
-            self.client.rename, source, target, suppress_retry_abort=False
-        )
+        return self.call_with_retry(self.client.rename, source, target, suppress_retry_abort=False)
 
     def access_shared(self, share_url, pwd=None):
         return self.call_with_retry(self.client.access_shared, share_url, pwd)

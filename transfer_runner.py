@@ -110,9 +110,7 @@ def save_failed_transfer_records(records, path=None):
     fd = None
     tmp_path = None
     try:
-        fd, tmp_name = tempfile.mkstemp(
-            prefix=f"{path.name}.", suffix=".tmp", dir=str(path.parent)
-        )
+        fd, tmp_name = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".tmp", dir=str(path.parent))
         tmp_path = Path(tmp_name)
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -210,9 +208,7 @@ def _normalize_failed_file(failed_file, fallback_error, now):
         error_kind, _default_retryable_for_error(error_info)
     )
     retryable = _coerce_bool(detail.get("retryable"), retryable_default)
-    temporary = _coerce_bool(
-        detail.get("temporary"), is_storage_temporary_error_info(error_info)
-    )
+    temporary = _coerce_bool(detail.get("temporary"), is_storage_temporary_error_info(error_info))
 
     normalized = {}
     for key in ("fs_id", "dir_path"):
@@ -576,9 +572,7 @@ def load_config_and_log(logger):
     if config.get("config_source") == "file":
         logger.info(f"检测到本地配置文件: {config['config_path']}，优先使用本地配置")
     elif config.get("config_load_warning"):
-        logger.warning(
-            f"读取本地配置文件失败，回退到环境变量: {config['config_load_warning']}"
-        )
+        logger.warning(f"读取本地配置文件失败，回退到环境变量: {config['config_load_warning']}")
 
     log_config_loaded(config)
     for warning in config.get("config_validation_warnings", []):

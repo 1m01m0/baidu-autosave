@@ -137,12 +137,7 @@ class TransferResultBuilderTests(unittest.TestCase):
         self.assertIsNone(result.error_details)
 
     def test_builder_builds_failure_result(self):
-        result = (
-            TransferResultBuilder()
-            .set_message("失败")
-            .set_error("转存失败")
-            .build()
-        )
+        result = TransferResultBuilder().set_message("失败").set_error("转存失败").build()
 
         self.assertFalse(result.success)
         self.assertFalse(result.partial)

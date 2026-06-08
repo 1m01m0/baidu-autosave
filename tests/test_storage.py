@@ -241,7 +241,9 @@ class BaiduStoragePureMethodTests(unittest.TestCase):
     def test_transfer_count_limit_error_detection(self):
         self.assertTrue(is_transfer_count_limit_error("error_code: -33"))
         self.assertTrue(is_transfer_count_limit_error("error_code: 120, message: 转存文件数超限"))
-        self.assertTrue(is_transfer_count_limit_error("error_code: 4, message: share transfer pcs error"))
+        self.assertTrue(
+            is_transfer_count_limit_error("error_code: 4, message: share transfer pcs error")
+        )
         self.assertTrue(is_transfer_count_limit_error("一次支持操作999个，减点试试吧"))
         self.assertTrue(is_transfer_count_limit_error("error_code: 4, message: too many files"))
         self.assertFalse(is_transfer_count_limit_error("error_code: 4, message: too many requests"))
@@ -363,8 +365,9 @@ class BaiduClientAdapterRetryTests(unittest.TestCase):
         ]
         logger = Mock()
 
-        with patch("storage_client.time.sleep"), patch(
-            "storage_client.get_logger", return_value=logger
+        with (
+            patch("storage_client.time.sleep"),
+            patch("storage_client.get_logger", return_value=logger),
         ):
             result = adapter.list("/save")
 
@@ -387,9 +390,7 @@ class BaiduClientAdapterRetryTests(unittest.TestCase):
         with self.assertRaises(RequestsJSONDecodeError):
             adapter.transfer_shared_paths(remotedir="/save", fs_ids=[1])
 
-        adapter.client.transfer_shared_paths.assert_called_once_with(
-            remotedir="/save", fs_ids=[1]
-        )
+        adapter.client.transfer_shared_paths.assert_called_once_with(remotedir="/save", fs_ids=[1])
 
     def test_list_does_not_swallow_retry_abort_errors(self):
         adapter = self._adapter()
@@ -464,22 +465,16 @@ class SharedPathServiceTests(unittest.TestCase):
             SimpleNamespace(path="/sharelink123-456/单集.mp4", is_dir=False),
         ]
 
-        self.assertEqual(
-            "/sharelink123-456", self.service._resolve_shared_root(shared_paths)
-        )
+        self.assertEqual("/sharelink123-456", self.service._resolve_shared_root(shared_paths))
 
     def test_trim_shared_root_keeps_relative_structure(self):
         self.assertEqual(
             "电影/单集.mp4",
-            self.service._trim_shared_root(
-                "/sharelink123-456/电影/单集.mp4", "/sharelink123-456"
-            ),
+            self.service._trim_shared_root("/sharelink123-456/电影/单集.mp4", "/sharelink123-456"),
         )
         self.assertEqual(
             "单集.mp4",
-            self.service._trim_shared_root(
-                "/single-share/单集.mp4", "/single-share"
-            ),
+            self.service._trim_shared_root("/single-share/单集.mp4", "/single-share"),
         )
 
     def test_list_shared_files_trims_root_without_hardcoded_sharelink_prefix(self):
@@ -582,7 +577,12 @@ class SharedPathServiceTests(unittest.TestCase):
         messages = [call.args[1] for call in progress_callback.call_args_list]
         self.assertTrue(any("开始获取共享文件列表，共 1 个入口" in msg for msg in messages))
         self.assertTrue(any("开始扫描共享入口 1/1: /single-share" in msg for msg in messages))
-        self.assertTrue(any("共享文件列表获取完成：扫描 1 个目录 / 1 页，发现 1 个文件" in msg for msg in messages))
+        self.assertTrue(
+            any(
+                "共享文件列表获取完成：扫描 1 个目录 / 1 页，发现 1 个文件" in msg
+                for msg in messages
+            )
+        )
         self.assertFalse(any("正在获取共享目录第" in msg for msg in messages))
 
     def test_list_shared_files_keeps_progress_callback_positional_compatibility(self):
@@ -630,9 +630,7 @@ class SharedPathServiceTests(unittest.TestCase):
         )
         self.service.client.list_shared_paths.return_value = [node_modules, app_file]
 
-        files = self.service.list_shared_files(
-            [root_dir], exclude_folder_filter=r"^node_modules$"
-        )
+        files = self.service.list_shared_files([root_dir], exclude_folder_filter=r"^node_modules$")
 
         self.assertEqual(1, len(files))
         self.assertEqual("app.py", files[0]["path"])
@@ -658,9 +656,13 @@ class SharedPathServiceTests(unittest.TestCase):
             path = child_path
             relative_parts.append(f"d{index}")
         listings[path] = [
-            SimpleNamespace(path=f"{path}/file.txt", is_dir=False, fs_id=99, size=123, md5="md5-file")
+            SimpleNamespace(
+                path=f"{path}/file.txt", is_dir=False, fs_id=99, size=123, md5="md5-file"
+            )
         ]
-        self.service.client.list_shared_paths.side_effect = lambda scan_path, *args, **kwargs: listings[scan_path]
+        self.service.client.list_shared_paths.side_effect = lambda scan_path, *args, **kwargs: (
+            listings[scan_path]
+        )
         old_limit = sys.getrecursionlimit()
 
         try:
@@ -683,16 +685,18 @@ class SharedPathServiceTests(unittest.TestCase):
         )
         src_dir = SimpleNamespace(path="/single-share/src", is_dir=True, fs_id=10)
         node_modules = SimpleNamespace(path="/single-share/src/node_modules", is_dir=True, fs_id=11)
-        app_file = SimpleNamespace(path="/single-share/src/app.py", is_dir=False, fs_id=12, size=1, md5="app")
+        app_file = SimpleNamespace(
+            path="/single-share/src/app.py", is_dir=False, fs_id=12, size=1, md5="app"
+        )
         listings = {
             "/single-share": [src_dir],
             "/single-share/src": [node_modules, app_file],
         }
-        self.service.client.list_shared_paths.side_effect = lambda scan_path, *args, **kwargs: listings.get(scan_path, [])
-
-        files = self.service.list_shared_files(
-            [root_dir], exclude_folder_filter=r"^node_modules$"
+        self.service.client.list_shared_paths.side_effect = lambda scan_path, *args, **kwargs: (
+            listings.get(scan_path, [])
         )
+
+        files = self.service.list_shared_files([root_dir], exclude_folder_filter=r"^node_modules$")
 
         self.assertEqual(1, len(files))
         self.assertEqual("src/app.py", files[0]["path"])
@@ -717,9 +721,7 @@ class SharedPathServiceTests(unittest.TestCase):
         )
         self.service.client.list_shared_paths.return_value = [child_dir, child_file]
 
-        children = self.service.list_shared_dir_children(
-            "/single-share", 1, 2, "token"
-        )
+        children = self.service.list_shared_dir_children("/single-share", 1, 2, "token")
 
         self.assertEqual(
             [
@@ -777,9 +779,7 @@ class SharedPathServiceTests(unittest.TestCase):
         ]
 
         with patch.object(SharedPathService, "SHARED_DIR_PAGE_SIZE", 1):
-            children = list(
-                self.service.iter_shared_dir_children("/single-share", 1, 2, "token")
-            )
+            children = list(self.service.iter_shared_dir_children("/single-share", 1, 2, "token"))
 
         self.assertEqual(["1.txt", "2.txt"], [child["name"] for child in children])
         self.service.client.list_shared_paths.assert_has_calls(
@@ -829,7 +829,9 @@ class StoragePathServiceTests(unittest.TestCase):
         client = Mock()
         listings = {
             "/save/A": [
-                SimpleNamespace(is_file=True, is_dir=False, path="/save/A/root.txt", md5="md5-root"),
+                SimpleNamespace(
+                    is_file=True, is_dir=False, path="/save/A/root.txt", md5="md5-root"
+                ),
                 SimpleNamespace(is_file=False, is_dir=True, path="/save/A/1"),
                 SimpleNamespace(is_file=False, is_dir=True, path="/save/A/2"),
                 SimpleNamespace(is_file=False, is_dir=True, path="/save/A/other"),
@@ -848,9 +850,7 @@ class StoragePathServiceTests(unittest.TestCase):
         client.list.side_effect = lambda path: listings[path]
         service = StoragePathService(client)
 
-        result = service.list_local_files_in_dirs(
-            "/save", {"A/1", "A/2"}, merge_dirs=True
-        )
+        result = service.list_local_files_in_dirs("/save", {"A/1", "A/2"}, merge_dirs=True)
 
         self.assertEqual(
             [
@@ -859,7 +859,9 @@ class StoragePathServiceTests(unittest.TestCase):
             ],
             result,
         )
-        self.assertEqual([call("/save/A"), call("/save/A/1"), call("/save/A/2")], client.list.call_args_list)
+        self.assertEqual(
+            [call("/save/A"), call("/save/A/1"), call("/save/A/2")], client.list.call_args_list
+        )
 
     def test_list_local_files_in_dirs_cache_separates_merge_mode(self):
         client = Mock()
@@ -878,16 +880,20 @@ class StoragePathServiceTests(unittest.TestCase):
         client.list.side_effect = lambda path: listings[path]
         service = StoragePathService(client)
 
-        direct_result = service.list_local_files_in_dirs(
-            "/save", {"A/1", "A/2"}, use_cache=True
-        )
+        direct_result = service.list_local_files_in_dirs("/save", {"A/1", "A/2"}, use_cache=True)
         merged_result = service.list_local_files_in_dirs(
             "/save", {"A/1", "A/2"}, use_cache=True, merge_dirs=True
         )
 
         self.assertEqual(direct_result, merged_result)
         self.assertEqual(
-            [call("/save/A/1"), call("/save/A/2"), call("/save/A"), call("/save/A/1"), call("/save/A/2")],
+            [
+                call("/save/A/1"),
+                call("/save/A/2"),
+                call("/save/A"),
+                call("/save/A/1"),
+                call("/save/A/2"),
+            ],
             client.list.call_args_list,
         )
 
@@ -957,7 +963,10 @@ class StoragePathServiceTests(unittest.TestCase):
         client.list.side_effect = [RuntimeError("error_code: 31066, message: 文件不存在")]
         service = StoragePathService(client)
 
-        with patch("storage_paths.time.sleep") as sleep, patch("storage_paths.handle_error_and_notify") as notify:
+        with (
+            patch("storage_paths.time.sleep") as sleep,
+            patch("storage_paths.handle_error_and_notify") as notify,
+        ):
             result = service.ensure_dir_exists("/save")
 
         self.assertTrue(result)
@@ -1048,7 +1057,9 @@ class StoragePathServiceTests(unittest.TestCase):
                 SimpleNamespace(is_file=True, is_dir=False, path="/save/A/2/b.txt", md5="md5-b")
             ],
             "/save/A/other": [
-                SimpleNamespace(is_file=True, is_dir=False, path="/save/A/other/ignored.txt", md5="ignored")
+                SimpleNamespace(
+                    is_file=True, is_dir=False, path="/save/A/other/ignored.txt", md5="ignored"
+                )
             ],
         }
         path = "/save/A/1"
@@ -1138,8 +1149,9 @@ class StoragePathServiceTests(unittest.TestCase):
         client.list.side_effect = RuntimeError("boom")
         service = StoragePathService(client)
 
-        with patch("storage_paths.LOCAL_SCAN_CONCURRENCY", 2), patch(
-            "storage_paths.handle_error_and_notify"
+        with (
+            patch("storage_paths.LOCAL_SCAN_CONCURRENCY", 2),
+            patch("storage_paths.handle_error_and_notify"),
         ):
             with self.assertRaises(RuntimeError):
                 service.list_local_files_in_dirs("/save", {"A", "B"})
@@ -1173,8 +1185,9 @@ class WeChatNotifierTests(unittest.TestCase):
             "token=access-secret key=webhook-secret"
         )
 
-        with patch("wechat_notifier.requests.post", return_value=response) as post, patch(
-            "builtins.print"
+        with (
+            patch("wechat_notifier.requests.post", return_value=response) as post,
+            patch("builtins.print"),
         ):
             self.assertTrue(notifier.send_message(message, "markdown"))
 
@@ -1284,9 +1297,7 @@ class BaiduStorageFlowTests(unittest.TestCase):
         }
         self.storage._load_share_entries = Mock(return_value=entry_context)
         self.storage._load_share_files = Mock()
-        self.storage.share_service.iter_shared_files.return_value = [
-            {"fs_id": 1, "path": "a.txt"}
-        ]
+        self.storage.share_service.iter_shared_files.return_value = [{"fs_id": 1, "path": "a.txt"}]
         self.storage._scan_local_files_dict = Mock(return_value={})
         self.storage._ensure_transfer_dirs = Mock(
             return_value={"success": False, "error": "创建目录失败: /save"}
@@ -1345,9 +1356,7 @@ class BaiduStorageFlowTests(unittest.TestCase):
         }
         self.storage._load_share_entries = Mock(return_value=entry_context)
         self.storage._load_share_files = Mock()
-        self.storage.share_service.iter_shared_files.return_value = [
-            {"fs_id": 1, "path": "a.txt"}
-        ]
+        self.storage.share_service.iter_shared_files.return_value = [{"fs_id": 1, "path": "a.txt"}]
         self.storage._scan_local_files_dict = Mock(return_value={})
         transfer_list = [(1, "/save", "a.txt", "a.txt", False)]
         self.storage._ensure_transfer_dirs = Mock(return_value=None)
@@ -1360,7 +1369,11 @@ class BaiduStorageFlowTests(unittest.TestCase):
         }
         self.storage._rename_transferred_files = Mock(return_value=rename_result)
         self.storage._build_transfer_result = Mock(
-            return_value={"success": True, "message": "成功转存 1/1 个文件", "transferred_files": ["a.txt"]}
+            return_value={
+                "success": True,
+                "message": "成功转存 1/1 个文件",
+                "transferred_files": ["a.txt"],
+            }
         )
 
         result = self.storage.transfer_share("https://pan.baidu.com/s/abc")
@@ -1406,7 +1419,9 @@ class BaiduStorageFlowTests(unittest.TestCase):
 
         self.storage._load_share_entries = Mock(return_value=entry_context)
         self.storage._load_share_files = Mock()
-        self.storage.share_service.iter_shared_files.side_effect = lambda *args, **kwargs: shared_files()
+        self.storage.share_service.iter_shared_files.side_effect = lambda *args, **kwargs: (
+            shared_files()
+        )
         self.storage._scan_local_files_dict = Mock(return_value={})
         self.storage.path_service.ensure_dir_exists.return_value = True
         self.storage.client.transfer_shared_paths.side_effect = transfer_side_effect
@@ -1455,7 +1470,9 @@ class BaiduStorageFlowTests(unittest.TestCase):
 
     def test_transfer_share_streaming_skips_duplicate_path_across_scan_batches(self):
         self.storage._normalize_save_dir = Mock(return_value="/save")
-        self.storage.path_service.normalize_path.side_effect = lambda path, file_only=False: str(path).strip("/")
+        self.storage.path_service.normalize_path.side_effect = lambda path, file_only=False: str(
+            path
+        ).strip("/")
         entry_context = {
             "shared_paths": [Mock(is_dir=False)],
             "uk": 1,
@@ -1515,9 +1532,7 @@ class BaiduStorageFlowTests(unittest.TestCase):
             bdstoken="token",
             shared_url="https://pan.baidu.com/s/abc",
         )
-        self.storage.client.rename.assert_called_once_with(
-            "/save/old.mp4", "/save/new.mp4"
-        )
+        self.storage.client.rename.assert_called_once_with("/save/old.mp4", "/save/new.mp4")
 
     def test_transfer_share_streaming_returns_partial_when_scan_fails_after_transfer(self):
         self.storage._normalize_save_dir = Mock(return_value="/save")
@@ -1533,7 +1548,9 @@ class BaiduStorageFlowTests(unittest.TestCase):
             raise RuntimeError("scan failed")
 
         self.storage._load_share_entries = Mock(return_value=entry_context)
-        self.storage.share_service.iter_shared_files.side_effect = lambda *args, **kwargs: shared_files()
+        self.storage.share_service.iter_shared_files.side_effect = lambda *args, **kwargs: (
+            shared_files()
+        )
         self.storage._scan_local_files_dict = Mock(return_value={})
         self.storage.path_service.ensure_dir_exists.return_value = True
 
@@ -1624,9 +1641,11 @@ class BaiduStorageFlowTests(unittest.TestCase):
 
         self.storage.share_service.iter_shared_files.return_value = []
 
-        with patch("storage_streaming.threading.Thread", FakeThread), patch(
-            "storage_streaming.get_logger", return_value=fake_logger
-        ), patch("storage_streaming.STREAM_PRODUCER_JOIN_TIMEOUT", 0.01):
+        with (
+            patch("storage_streaming.threading.Thread", FakeThread),
+            patch("storage_streaming.get_logger", return_value=fake_logger),
+            patch("storage_streaming.STREAM_PRODUCER_JOIN_TIMEOUT", 0.01),
+        ):
             result = self.storage._transfer_share_streaming(
                 context,
                 "https://pan.baidu.com/s/abc",
@@ -1709,7 +1728,9 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.storage.client.transfer_shared_paths.side_effect = RequestsJSONDecodeError(
             "Expecting value", "", 0
         )
-        self.storage._transfer_share_streaming = Mock(return_value={"success": True, "message": "fallback"})
+        self.storage._transfer_share_streaming = Mock(
+            return_value={"success": True, "message": "fallback"}
+        )
 
         result = self.storage.transfer_share("url", save_dir="/save")
 
@@ -1757,7 +1778,9 @@ class BaiduStorageFlowTests(unittest.TestCase):
     def test_transfer_share_divides_tree_when_root_dir_hits_count_limit(self):
         shared_dir = SimpleNamespace(is_dir=True, fs_id=10, path="/share/course")
         child_file = {
-            "raw": SimpleNamespace(path="/share/course/a.txt", is_dir=False, is_file=True, fs_id=11),
+            "raw": SimpleNamespace(
+                path="/share/course/a.txt", is_dir=False, is_file=True, fs_id=11
+            ),
             "fs_id": 11,
             "path": "/share/course/a.txt",
             "name": "a.txt",
@@ -1903,7 +1926,9 @@ class BaiduStorageFlowTests(unittest.TestCase):
     def test_transfer_share_recurses_when_subdir_fast_path_hits_count_limit(self):
         shared_dir = SimpleNamespace(is_dir=True, fs_id=10, path="/share/course")
         big_dir = SimpleNamespace(path="/share/course/big", is_dir=True, is_file=False, fs_id=20)
-        big_child = SimpleNamespace(path="/share/course/big/a.txt", is_dir=False, is_file=True, fs_id=21)
+        big_child = SimpleNamespace(
+            path="/share/course/big/a.txt", is_dir=False, is_file=True, fs_id=21
+        )
         child_dir = {
             "raw": big_dir,
             "fs_id": 20,
@@ -1980,7 +2005,9 @@ class BaiduStorageFlowTests(unittest.TestCase):
     def test_transfer_share_uses_tree_divide_when_exclude_filter_is_set(self):
         shared_dir = SimpleNamespace(is_dir=True, fs_id=10, path="/share/course")
         excluded_dir = {
-            "raw": SimpleNamespace(path="/share/course/node_modules", is_dir=True, is_file=False, fs_id=20),
+            "raw": SimpleNamespace(
+                path="/share/course/node_modules", is_dir=True, is_file=False, fs_id=20
+            ),
             "fs_id": 20,
             "path": "/share/course/node_modules",
             "name": "node_modules",
@@ -1988,7 +2015,9 @@ class BaiduStorageFlowTests(unittest.TestCase):
             "is_file": False,
         }
         app_file = {
-            "raw": SimpleNamespace(path="/share/course/app.py", is_dir=False, is_file=True, fs_id=21),
+            "raw": SimpleNamespace(
+                path="/share/course/app.py", is_dir=False, is_file=True, fs_id=21
+            ),
             "fs_id": 21,
             "path": "/share/course/app.py",
             "name": "app.py",
@@ -2122,7 +2151,9 @@ class BaiduStorageFlowTests(unittest.TestCase):
         path = "/share/course"
         for index in range(depth):
             child_path = f"{path}/d{index}"
-            child_dir = SimpleNamespace(path=child_path, is_dir=True, is_file=False, fs_id=index + 20)
+            child_dir = SimpleNamespace(
+                path=child_path, is_dir=True, is_file=False, fs_id=index + 20
+            )
             children_by_path[path] = [
                 {
                     "raw": child_dir,
@@ -2136,7 +2167,9 @@ class BaiduStorageFlowTests(unittest.TestCase):
             path = child_path
         children_by_path[path] = [
             {
-                "raw": SimpleNamespace(path=f"{path}/file.txt", is_dir=False, is_file=True, fs_id=999),
+                "raw": SimpleNamespace(
+                    path=f"{path}/file.txt", is_dir=False, is_file=True, fs_id=999
+                ),
                 "fs_id": 999,
                 "path": f"{path}/file.txt",
                 "name": "file.txt",
@@ -2168,13 +2201,17 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertEqual(1, result["completed_count"])
         self.storage.client.transfer_shared_paths.assert_called_once()
-        self.assertEqual([999], self.storage.client.transfer_shared_paths.call_args.kwargs["fs_ids"])
+        self.assertEqual(
+            [999], self.storage.client.transfer_shared_paths.call_args.kwargs["fs_ids"]
+        )
 
     def test_transfer_dir_tree_divide_splits_files_by_batch_size(self):
         shared_dir = SimpleNamespace(path="/share/course", is_dir=True, fs_id=10)
         children = [
             {
-                "raw": SimpleNamespace(path=f"/share/course/{fs_id}.txt", is_dir=False, is_file=True, fs_id=fs_id),
+                "raw": SimpleNamespace(
+                    path=f"/share/course/{fs_id}.txt", is_dir=False, is_file=True, fs_id=fs_id
+                ),
                 "fs_id": fs_id,
                 "path": f"/share/course/{fs_id}.txt",
                 "name": f"{fs_id}.txt",
@@ -2209,7 +2246,9 @@ class BaiduStorageFlowTests(unittest.TestCase):
 
         def child(fs_id):
             return {
-                "raw": SimpleNamespace(path=f"/share/course/{fs_id}.txt", is_dir=False, is_file=True, fs_id=fs_id),
+                "raw": SimpleNamespace(
+                    path=f"/share/course/{fs_id}.txt", is_dir=False, is_file=True, fs_id=fs_id
+                ),
                 "fs_id": fs_id,
                 "path": f"/share/course/{fs_id}.txt",
                 "name": f"{fs_id}.txt",
@@ -2427,7 +2466,9 @@ class BaiduStorageFlowTests(unittest.TestCase):
         progress_callback = Mock()
 
         with patch("storage.handle_error_and_notify"):
-            result = self.storage._process_single_share_config(1, 2, "bad-config", progress_callback)
+            result = self.storage._process_single_share_config(
+                1, 2, "bad-config", progress_callback
+            )
 
         self.assertFalse(result["success"])
         self.assertIn("缺少分享链接", result["error"])
@@ -2490,16 +2531,20 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertEqual(3, result["success_count"])
         # 即便 worker 完成顺序受调度影响，results 仍按 index=1,2,3 的顺序合并
-        self.assertEqual(
-            [1, 2, 3], [item["index"] for item in result["results"]]
-        )
+        self.assertEqual([1, 2, 3], [item["index"] for item in result["results"]])
 
     def test_transfer_multiple_shares_concurrent_aggregates_failed_count_once(self):
         """并发模式下 counters 不应重复累加（修复双重计数风险）。"""
         self.storage._process_single_share_config = Mock(
             side_effect=[
                 {"index": 1, "share_url": "u1", "success": True, "partial": False, "message": "ok"},
-                {"index": 2, "share_url": "u2", "success": False, "partial": False, "error": "fail"},
+                {
+                    "index": 2,
+                    "share_url": "u2",
+                    "success": False,
+                    "partial": False,
+                    "error": "fail",
+                },
             ]
         )
 
@@ -2515,9 +2560,31 @@ class BaiduStorageFlowTests(unittest.TestCase):
     def test_transfer_multiple_shares_aggregates_counts_as_partial_when_has_failure(self):
         self.storage._process_single_share_config = Mock(
             side_effect=[
-                {"index": 1, "share_url": "u1", "save_dir": "/a", "success": True, "partial": False, "message": "成功"},
-                {"index": 2, "share_url": "u2", "save_dir": "/b", "success": True, "partial": False, "skipped": True, "message": "跳过"},
-                {"index": 3, "share_url": "u3", "save_dir": "/c", "success": False, "partial": False, "error": "失败"},
+                {
+                    "index": 1,
+                    "share_url": "u1",
+                    "save_dir": "/a",
+                    "success": True,
+                    "partial": False,
+                    "message": "成功",
+                },
+                {
+                    "index": 2,
+                    "share_url": "u2",
+                    "save_dir": "/b",
+                    "success": True,
+                    "partial": False,
+                    "skipped": True,
+                    "message": "跳过",
+                },
+                {
+                    "index": 3,
+                    "share_url": "u3",
+                    "save_dir": "/c",
+                    "success": False,
+                    "partial": False,
+                    "error": "失败",
+                },
             ]
         )
         progress_callback = Mock()
@@ -2585,15 +2652,21 @@ class BaiduStorageFlowTests(unittest.TestCase):
             }
         )
 
-        result = self.storage.transfer_multiple_shares([{"share_url": "https://pan.baidu.com/s/abc"}])
+        result = self.storage.transfer_multiple_shares(
+            [{"share_url": "https://pan.baidu.com/s/abc"}]
+        )
 
         self.assertTrue(result["partial"])
         self.assertEqual(1, result["transfer_failed_count"])
         self.assertEqual("a.txt", result["transfer_failed_files"][0]["clean_path"])
         self.assertEqual("/a", result["transfer_failed_files"][0]["save_dir"])
 
-    def test_build_transfer_list_skips_rename_candidate_when_source_exists_to_avoid_duplicate_copy(self):
-        self.storage.path_service.normalize_path.side_effect = lambda path, file_only=False: path.strip("/")
+    def test_build_transfer_list_skips_rename_candidate_when_source_exists_to_avoid_duplicate_copy(
+        self,
+    ):
+        self.storage.path_service.normalize_path.side_effect = lambda path, file_only=False: (
+            path.strip("/")
+        )
         progress_callback = Mock()
 
         result = self.storage._build_transfer_list(
@@ -2631,7 +2704,9 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.assertEqual(1, summary["candidate_count"])
 
     def test_build_transfer_list_skips_rename_candidate_when_target_exists(self):
-        self.storage.path_service.normalize_path.side_effect = lambda path, file_only=False: path.strip("/")
+        self.storage.path_service.normalize_path.side_effect = lambda path, file_only=False: (
+            path.strip("/")
+        )
         progress_callback = Mock()
 
         result = self.storage._build_transfer_list(
@@ -2652,7 +2727,9 @@ class BaiduStorageFlowTests(unittest.TestCase):
         )
 
     def test_build_transfer_list_marks_existing_path_without_md5_as_conflict(self):
-        self.storage.path_service.normalize_path.side_effect = lambda path, file_only=False: path.strip("/")
+        self.storage.path_service.normalize_path.side_effect = lambda path, file_only=False: (
+            path.strip("/")
+        )
         progress_callback = Mock()
 
         result = self.storage._build_transfer_list(
@@ -2674,7 +2751,9 @@ class BaiduStorageFlowTests(unittest.TestCase):
         )
 
     def test_build_transfer_list_skips_duplicate_path_planned_in_same_batch(self):
-        self.storage.path_service.normalize_path.side_effect = lambda path, file_only=False: path.strip("/")
+        self.storage.path_service.normalize_path.side_effect = lambda path, file_only=False: (
+            path.strip("/")
+        )
         progress_callback = Mock()
 
         result = self.storage._build_transfer_list(
@@ -2700,7 +2779,9 @@ class BaiduStorageFlowTests(unittest.TestCase):
         )
 
     def test_build_transfer_list_treats_rename_target_as_planned_path(self):
-        self.storage.path_service.normalize_path.side_effect = lambda path, file_only=False: path.strip("/")
+        self.storage.path_service.normalize_path.side_effect = lambda path, file_only=False: (
+            path.strip("/")
+        )
         progress_callback = Mock()
 
         result = self.storage._build_transfer_list(
@@ -2864,8 +2945,7 @@ class BaiduStorageFlowTests(unittest.TestCase):
     def test_execute_transfer_plan_retries_count_limit_batch_with_smaller_batches(self):
         self.storage.path_service.normalize_path.side_effect = lambda path, **kwargs: path
         transfer_list = [
-            (fs_id, "/save", f"{fs_id}.txt", f"{fs_id}.txt", False)
-            for fs_id in range(350)
+            (fs_id, "/save", f"{fs_id}.txt", f"{fs_id}.txt", False) for fs_id in range(350)
         ]
         self.storage.client.transfer_shared_paths.side_effect = [
             RuntimeError("error_code: 120, message: 转存文件数超限"),
@@ -2874,9 +2954,11 @@ class BaiduStorageFlowTests(unittest.TestCase):
             None,
         ]
 
-        with patch("storage_transfer_plan.TRANSFER_BATCH_SIZE", 999), patch(
-            "storage_transfer_plan.time.sleep"
-        ), patch("storage_transfer_plan.handle_error_and_notify") as notify:
+        with (
+            patch("storage_transfer_plan.TRANSFER_BATCH_SIZE", 999),
+            patch("storage_transfer_plan.time.sleep"),
+            patch("storage_transfer_plan.handle_error_and_notify") as notify,
+        ):
             success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
                 transfer_list, "url", 1, 2, "token", "/save"
             )
@@ -2895,8 +2977,7 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.storage.path_service.normalize_path.side_effect = lambda path, **kwargs: path
         self.storage._scan_local_files_dict = Mock(return_value={})
         transfer_list = [
-            (fs_id, "/save", f"{fs_id}.txt", f"{fs_id}.txt", False)
-            for fs_id in range(3)
+            (fs_id, "/save", f"{fs_id}.txt", f"{fs_id}.txt", False) for fs_id in range(3)
         ]
         failed_full_batch = False
         failed_single_item = False
@@ -2913,11 +2994,12 @@ class BaiduStorageFlowTests(unittest.TestCase):
 
         self.storage.client.transfer_shared_paths.side_effect = transfer_side_effect
 
-        with patch("storage_transfer_plan.TRANSFER_BATCH_SIZE", 3), patch(
-            "storage_transfer_plan.TRANSFER_FAILED_RETRY_ATTEMPTS", 1
-        ), patch("storage_transfer_plan.time.sleep"), patch(
-            "storage_transfer_plan.handle_error_and_notify"
-        ) as notify:
+        with (
+            patch("storage_transfer_plan.TRANSFER_BATCH_SIZE", 3),
+            patch("storage_transfer_plan.TRANSFER_FAILED_RETRY_ATTEMPTS", 1),
+            patch("storage_transfer_plan.time.sleep"),
+            patch("storage_transfer_plan.handle_error_and_notify") as notify,
+        ):
             success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
                 transfer_list, "url", 1, 2, "token", "/save"
             )
@@ -2938,13 +3020,13 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.storage.client.transfer_shared_paths.side_effect = RuntimeError(
             "error_code: 4, message: 存储好像出问题了，请稍候再试"
         )
-        self.storage._split_existing_transfer_items = Mock(
-            return_value=([], [transfer_item])
-        )
+        self.storage._split_existing_transfer_items = Mock(return_value=([], [transfer_item]))
 
-        with patch("storage_transfer_plan.TRANSFER_FAILED_RETRY_ATTEMPTS", 5), patch(
-            "storage_transfer_plan.time.sleep"
-        ) as sleep, patch("storage_transfer_plan.handle_error_and_notify") as notify:
+        with (
+            patch("storage_transfer_plan.TRANSFER_FAILED_RETRY_ATTEMPTS", 5),
+            patch("storage_transfer_plan.time.sleep") as sleep,
+            patch("storage_transfer_plan.handle_error_and_notify") as notify,
+        ):
             success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
                 [transfer_item], "url", 1, 2, "token", "/save"
             )
@@ -2973,14 +3055,13 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.storage.client.transfer_shared_paths.side_effect = RuntimeError(
             "error_code: 4, message: 存储好像出问题了，请稍候再试"
         )
-        self.storage._split_existing_transfer_items = Mock(
-            return_value=([], [transfer_list[0]])
-        )
+        self.storage._split_existing_transfer_items = Mock(return_value=([], [transfer_list[0]]))
 
-        with patch("storage_transfer_plan.TRANSFER_BATCH_SIZE", 1), patch(
-            "storage_transfer_plan.TRANSFER_FAILED_RETRY_ATTEMPTS", 5
-        ), patch("storage_transfer_plan.time.sleep") as sleep, patch(
-            "storage_transfer_plan.handle_error_and_notify"
+        with (
+            patch("storage_transfer_plan.TRANSFER_BATCH_SIZE", 1),
+            patch("storage_transfer_plan.TRANSFER_FAILED_RETRY_ATTEMPTS", 5),
+            patch("storage_transfer_plan.time.sleep") as sleep,
+            patch("storage_transfer_plan.handle_error_and_notify"),
         ):
             success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
                 transfer_list, "url", 1, 2, "token", "/save"
@@ -3003,9 +3084,7 @@ class BaiduStorageFlowTests(unittest.TestCase):
             RequestsJSONDecodeError("Expecting value", "", 0),
             None,
         ]
-        self.storage._split_existing_transfer_items = Mock(
-            return_value=([], [transfer_list[1]])
-        )
+        self.storage._split_existing_transfer_items = Mock(return_value=([], [transfer_list[1]]))
 
         with patch("storage_transfer_plan.time.sleep"):
             success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
@@ -3023,16 +3102,14 @@ class BaiduStorageFlowTests(unittest.TestCase):
     def test_execute_transfer_plan_does_not_retry_non_retryable_errors(self):
         self.storage.path_service.normalize_path.side_effect = lambda path, **kwargs: path
         transfer_item = (1, "/save", "a.txt", "a.txt", False)
-        self.storage.client.transfer_shared_paths.side_effect = RuntimeError(
-            "error_code: 31066"
-        )
-        self.storage._split_existing_transfer_items = Mock(
-            return_value=([], [transfer_item])
-        )
+        self.storage.client.transfer_shared_paths.side_effect = RuntimeError("error_code: 31066")
+        self.storage._split_existing_transfer_items = Mock(return_value=([], [transfer_item]))
 
-        with patch("storage_transfer_plan.TRANSFER_FAILED_RETRY_ATTEMPTS", 1), patch(
-            "storage_transfer_plan.time.sleep"
-        ) as sleep, patch("storage_transfer_plan.handle_error_and_notify") as notify:
+        with (
+            patch("storage_transfer_plan.TRANSFER_FAILED_RETRY_ATTEMPTS", 1),
+            patch("storage_transfer_plan.time.sleep") as sleep,
+            patch("storage_transfer_plan.handle_error_and_notify") as notify,
+        ):
             success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
                 [transfer_item], "url", 1, 2, "token", "/save"
             )
@@ -3064,8 +3141,9 @@ class BaiduStorageFlowTests(unittest.TestCase):
             side_effect=[([], [transfer_item]), ([completed_item], [])]
         )
 
-        with patch("storage_transfer_plan.TRANSFER_FAILED_RETRY_ATTEMPTS", 1), patch(
-            "storage_transfer_plan.time.sleep"
+        with (
+            patch("storage_transfer_plan.TRANSFER_FAILED_RETRY_ATTEMPTS", 1),
+            patch("storage_transfer_plan.time.sleep"),
         ):
             success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
                 [transfer_item], "url", 1, 2, "token", "/save"
@@ -3086,9 +3164,7 @@ class BaiduStorageFlowTests(unittest.TestCase):
             return_value={"a.txt": "md5-a", "done.txt": "md5-done"}
         )
 
-        existing_items, missing_items = self.storage._split_existing_transfer_items(
-            items, "/save"
-        )
+        existing_items, missing_items = self.storage._split_existing_transfer_items(items, "/save")
 
         self.assertEqual(
             [
@@ -3156,9 +3232,11 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.storage._clear_local_files_cache = Mock()
         self.storage._scan_local_files_dict = Mock(side_effect=[{}, {"a.txt": "md5-a"}])
 
-        with patch("storage_transfer_plan.TRANSFER_FAILED_RETRY_ATTEMPTS", 1), patch(
-            "storage_transfer_plan.time.sleep"
-        ), patch("storage_transfer_plan.handle_error_and_notify"):
+        with (
+            patch("storage_transfer_plan.TRANSFER_FAILED_RETRY_ATTEMPTS", 1),
+            patch("storage_transfer_plan.time.sleep"),
+            patch("storage_transfer_plan.handle_error_and_notify"),
+        ):
             success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
                 [transfer_item], "url", 1, 2, "token", "/save"
             )
@@ -3170,9 +3248,7 @@ class BaiduStorageFlowTests(unittest.TestCase):
 
     def test_execute_transfer_plan_renames_existing_source_without_retransfer(self):
         self.storage.path_service.normalize_path.side_effect = lambda path, **kwargs: path
-        transfer_item = TransferItem(
-            1, "/save/old", "old/a.txt", "new/a.txt", True, "md5-a"
-        )
+        transfer_item = TransferItem(1, "/save/old", "old/a.txt", "new/a.txt", True, "md5-a")
         self.storage._scan_local_files_dict = Mock(return_value={"old/a.txt": "md5-a"})
 
         success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
@@ -3238,9 +3314,7 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.assertIn("重命名失败", result["message"])
 
     def test_build_transfer_result_includes_transfer_failed_files(self):
-        failed_files = [
-            {"fs_id": 2, "clean_path": "b.txt", "final_path": "b.txt", "error": "boom"}
-        ]
+        failed_files = [{"fs_id": 2, "clean_path": "b.txt", "final_path": "b.txt", "error": "boom"}]
 
         result = self.storage._build_transfer_result(
             1,
@@ -3261,7 +3335,9 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.assertEqual(failed_files, result["transfer_failed_files"])
         self.assertIn("转存失败", result["message"])
 
-    def test_build_transfer_result_treats_transfer_success_with_all_rename_failures_as_partial(self):
+    def test_build_transfer_result_treats_transfer_success_with_all_rename_failures_as_partial(
+        self,
+    ):
         result = self.storage._build_transfer_result(
             2,
             2,
@@ -3318,9 +3394,7 @@ class BaiduStorageFlowTests(unittest.TestCase):
 
 class BaiduClientAdapterTests(unittest.TestCase):
     def test_parse_cookies_skips_invalid_items(self):
-        result = BaiduClientAdapter.parse_cookies(
-            "BDUSS=foo; invalid; STOKEN=bar; key = value "
-        )
+        result = BaiduClientAdapter.parse_cookies("BDUSS=foo; invalid; STOKEN=bar; key = value ")
 
         self.assertEqual({"BDUSS": "foo", "STOKEN": "bar", "key": "value"}, result)
 
@@ -3425,9 +3499,7 @@ class BaiduClientAdapterPoolSizingTests(unittest.TestCase):
 
     def test_compute_pool_maxsize_explicit_value_ignores_ga_offset(self):
         adapter = self._adapter(is_github_actions=True)
-        with patch.dict(
-            os.environ, {"TRANSFERSHARE_PCS_POOL_MAXSIZE": "64"}, clear=True
-        ):
+        with patch.dict(os.environ, {"TRANSFERSHARE_PCS_POOL_MAXSIZE": "64"}, clear=True):
             maxsize, connections, _ = adapter._compute_pool_maxsize()
         # 显式 64：直接用，不再 +8
         self.assertEqual(64, maxsize)
@@ -3435,9 +3507,7 @@ class BaiduClientAdapterPoolSizingTests(unittest.TestCase):
 
     def test_compute_pool_maxsize_zero_signals_disable(self):
         adapter = self._adapter(is_github_actions=True)
-        with patch.dict(
-            os.environ, {"TRANSFERSHARE_PCS_POOL_MAXSIZE": "0"}, clear=True
-        ):
+        with patch.dict(os.environ, {"TRANSFERSHARE_PCS_POOL_MAXSIZE": "0"}, clear=True):
             maxsize, connections, fanout = adapter._compute_pool_maxsize()
         # 显式 0：表示禁用 patch
         self.assertEqual(0, maxsize)
@@ -3446,15 +3516,11 @@ class BaiduClientAdapterPoolSizingTests(unittest.TestCase):
 
     def test_compute_pool_maxsize_invalid_fanout_falls_back(self):
         adapter = self._adapter(is_github_actions=False)
-        with patch.dict(
-            os.environ, {"TRANSFERSHARE_PCS_POOL_FANOUT": "bad"}, clear=True
-        ):
+        with patch.dict(os.environ, {"TRANSFERSHARE_PCS_POOL_FANOUT": "bad"}, clear=True):
             with self.assertLogs("transfershare", level="WARNING") as ctx:
                 _, _, fanout = adapter._compute_pool_maxsize()
         self.assertEqual(4, fanout)
-        self.assertTrue(
-            any("TRANSFERSHARE_PCS_POOL_FANOUT" in msg for msg in ctx.output)
-        )
+        self.assertTrue(any("TRANSFERSHARE_PCS_POOL_FANOUT" in msg for msg in ctx.output))
 
     def test_compute_pool_maxsize_scales_with_multi_concurrency(self):
         adapter = self._adapter(is_github_actions=False)
@@ -3526,12 +3592,8 @@ class BaiduClientAdapterSessionPatchTests(unittest.TestCase):
         self.assertIsNot(original_https, new_https)
         self.assertIsNot(original_http, new_http)
         # 池容量等于 _compute_pool_maxsize 决策值（本地默认 32）
-        self.assertEqual(
-            32, new_https.poolmanager.connection_pool_kw.get("maxsize")
-        )
-        self.assertEqual(
-            32, new_http.poolmanager.connection_pool_kw.get("maxsize")
-        )
+        self.assertEqual(32, new_https.poolmanager.connection_pool_kw.get("maxsize"))
+        self.assertEqual(32, new_http.poolmanager.connection_pool_kw.get("maxsize"))
         self.assertTrue(adapter.session_pool_info["patched"])
         self.assertEqual(32, adapter.session_pool_info["pool_maxsize"])
 
@@ -3544,18 +3606,14 @@ class BaiduClientAdapterSessionPatchTests(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertFalse(adapter.session_pool_info["patched"])
-        self.assertTrue(
-            any("不是 requests.Session 实例" in msg for msg in ctx.output)
-        )
+        self.assertTrue(any("不是 requests.Session 实例" in msg for msg in ctx.output))
 
     def test_patch_session_pool_disabled_by_explicit_zero(self):
         adapter = self._adapter()
         pcs_candidate = self._make_pcs_candidate()
         original_adapters = dict(pcs_candidate._session.adapters)
 
-        with patch.dict(
-            os.environ, {"TRANSFERSHARE_PCS_POOL_MAXSIZE": "0"}, clear=True
-        ):
+        with patch.dict(os.environ, {"TRANSFERSHARE_PCS_POOL_MAXSIZE": "0"}, clear=True):
             ok = adapter._patch_session_pool(pcs_candidate)
 
         self.assertFalse(ok)
@@ -3578,9 +3636,11 @@ class BaiduClientAdapterSessionPatchTests(unittest.TestCase):
                 raise RuntimeError("boom")
             return original_mount(prefix, ad)
 
-        with patch.dict(os.environ, {}, clear=True), patch.object(
-            pcs_candidate._session, "mount", side_effect=faulty_mount
-        ), self.assertLogs("transfershare", level="WARNING") as ctx:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(pcs_candidate._session, "mount", side_effect=faulty_mount),
+            self.assertLogs("transfershare", level="WARNING") as ctx,
+        ):
             ok = adapter._patch_session_pool(pcs_candidate)
 
         self.assertFalse(ok)
@@ -3589,18 +3649,18 @@ class BaiduClientAdapterSessionPatchTests(unittest.TestCase):
         for key, value in snapshot.items():
             self.assertIs(value, pcs_candidate._session.adapters[key])
         self.assertFalse(adapter.session_pool_info["patched"])
-        self.assertTrue(
-            any("会话连接池替换失败" in msg for msg in ctx.output)
-        )
+        self.assertTrue(any("会话连接池替换失败" in msg for msg in ctx.output))
 
     def test_apply_session_patches_skips_when_already_patched(self):
         adapter = self._adapter()
         pcs_candidate = self._make_pcs_candidate()
         pcs_candidate._session_concurrency_patched = True
 
-        with patch.dict(os.environ, {}, clear=True), patch.object(
-            adapter, "_patch_session_pool"
-        ) as mock_pool, self.assertLogs("transfershare", level="DEBUG") as ctx:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(adapter, "_patch_session_pool") as mock_pool,
+            self.assertLogs("transfershare", level="DEBUG") as ctx,
+        ):
             adapter._apply_session_patches(pcs_candidate)
 
         mock_pool.assert_not_called()
@@ -3613,9 +3673,7 @@ class BaiduClientAdapterSessionPatchTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             adapter._apply_session_patches(pcs_candidate)
             # 第二次：因 _session_concurrency_patched=True 应跳过
-            with patch.object(
-                pcs_candidate._session, "mount"
-            ) as mock_mount:
+            with patch.object(pcs_candidate._session, "mount") as mock_mount:
                 adapter._apply_session_patches(pcs_candidate)
         # 第二次完全没调 mount
         mock_mount.assert_not_called()
@@ -3625,9 +3683,10 @@ class BaiduClientAdapterSessionPatchTests(unittest.TestCase):
         adapter = self._adapter(is_github_actions=True)
         pcs_candidate = self._make_pcs_candidate()
 
-        with patch.dict(os.environ, {}, clear=True), self.assertLogs(
-            "transfershare", level="INFO"
-        ) as ctx:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            self.assertLogs("transfershare", level="INFO") as ctx,
+        ):
             adapter._apply_session_patches(pcs_candidate)
 
         info_lines = [msg for msg in ctx.output if "会话并发 patch 已启用" in msg]
@@ -3657,9 +3716,10 @@ class BaiduClientAdapterSessionPatchTests(unittest.TestCase):
             def quota(self):
                 return (1024, 512)
 
-        with patch.object(
-            BaiduClientAdapter, "_pcs_factory", staticmethod(FakeApi)
-        ), patch.dict(os.environ, {}, clear=True):
+        with (
+            patch.object(BaiduClientAdapter, "_pcs_factory", staticmethod(FakeApi)),
+            patch.dict(os.environ, {}, clear=True),
+        ):
             adapter = BaiduClientAdapter("BDUSS=foo; STOKEN=bar")
 
         # _init_client 不抛异常
@@ -3747,9 +3807,10 @@ class BaiduClientAdapterSessionPatchTests(unittest.TestCase):
         # 给 pcs_candidate 一个简单的 _cookies_update
         pcs_candidate._cookies_update = lambda c, *a, **kw: None
 
-        with patch.dict(os.environ, {}, clear=True), self.assertLogs(
-            "transfershare", level="INFO"
-        ) as ctx:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            self.assertLogs("transfershare", level="INFO") as ctx,
+        ):
             adapter._apply_session_patches(pcs_candidate)
 
         info_lines = [msg for msg in ctx.output if "patched_cookies_update=true" in msg]

@@ -21,9 +21,7 @@ DIR_OPERATION_RETRY_DELAY = 1
 # 用 ThreadPoolExecutor 同时扫多个子目录。默认 1（串行，与历史行为一致）。
 # 注意：百度对 list 接口有限频，调高后命中限频会自动通过 call_with_retry 退避，
 # 但实际加速比依赖于扫描目录数 / 限频阈值的关系，建议从 2~4 起步实测。
-LOCAL_SCAN_CONCURRENCY = read_positive_int_env(
-    "TRANSFERSHARE_LOCAL_SCAN_CONCURRENCY", 1
-)
+LOCAL_SCAN_CONCURRENCY = read_positive_int_env("TRANSFERSHARE_LOCAL_SCAN_CONCURRENCY", 1)
 
 
 class StoragePathService:
@@ -247,9 +245,7 @@ class StoragePathService:
                     scan_plan.pop(path, None)
         return scan_plan
 
-    def list_local_files_in_dirs(
-        self, dir_path, relative_dirs, use_cache=False, merge_dirs=False
-    ):
+    def list_local_files_in_dirs(self, dir_path, relative_dirs, use_cache=False, merge_dirs=False):
         normalized_dir_path = self.normalize_path(dir_path)
         normalized_relative_dirs = {
             self._normalize_relative_dir(relative_dir) for relative_dir in (relative_dirs or {""})
@@ -277,9 +273,7 @@ class StoragePathService:
         base = normalized_dir_path.replace("\\", "/")
         if not base.endswith("/"):
             base += "/"
-        scan_plan = self._build_local_scan_plan(
-            normalized_relative_dirs, merge_dirs=merge_dirs
-        )
+        scan_plan = self._build_local_scan_plan(normalized_relative_dirs, merge_dirs=merge_dirs)
 
         sorted_plan = sorted(scan_plan.items())
         files = self._collect_local_scan_results(
@@ -452,4 +446,3 @@ class StoragePathService:
             with self.shared_state_lock:
                 self._local_files_cache[normalized_dir_path] = [dict(item) for item in files]
         return files
-

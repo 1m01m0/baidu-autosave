@@ -48,14 +48,15 @@ https://pan.baidu.com/s/xyz_789
         self.assertEqual("/Docs", result[0]["save_dir"])
 
     def test_parse_share_links_from_text_skips_invalid_pwd_query(self):
-        self.assertEqual([], parse_share_links_from_text("https://pan.baidu.com/s/abc12345?pwd=abcde"))
+        self.assertEqual(
+            [], parse_share_links_from_text("https://pan.baidu.com/s/abc12345?pwd=abcde")
+        )
 
 
 class NormalizeShareUrlsValueTests(unittest.TestCase):
     def test_normalize_share_urls_value_supports_comma_separated_string(self):
         share_urls = (
-            "https://pan.baidu.com/s/abc12345?pwd=1a2B,"
-            "https://pan.baidu.com/s/xyz_789 /Shows"
+            "https://pan.baidu.com/s/abc12345?pwd=1a2B,https://pan.baidu.com/s/xyz_789 /Shows"
         )
 
         result = normalize_share_urls_value(share_urls, "/Default")
@@ -86,7 +87,9 @@ class NormalizeShareUrlsValueTests(unittest.TestCase):
             [{"share_url": "https://pan.baidu.com/s/abc12345?pwd=1a2B"}], "/Default"
         )
 
-        self.assertEqual("https://pan.baidu.com/s/abc12345", result["share_configs"][0]["share_url"])
+        self.assertEqual(
+            "https://pan.baidu.com/s/abc12345", result["share_configs"][0]["share_url"]
+        )
         self.assertEqual("1a2B", result["share_configs"][0]["pwd"])
 
 
@@ -351,9 +354,7 @@ class LoadRuntimeConfigTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with self.assertRaisesRegex(
-                    ValueError, "配置文件缺少 share_urls"
-                ):
+                with self.assertRaisesRegex(ValueError, "配置文件缺少 share_urls"):
                     load_runtime_config(config_path)
 
     def test_load_runtime_config_raises_for_invalid_runtime_config(self):

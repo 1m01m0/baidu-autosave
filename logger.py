@@ -55,14 +55,18 @@ def _close_handlers(target_logger: logging.Logger) -> None:
         handler.close()
 
 
-def _add_console_handler(target_logger: logging.Logger, level: int, formatter: logging.Formatter) -> None:
+def _add_console_handler(
+    target_logger: logging.Logger, level: int, formatter: logging.Formatter
+) -> None:
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(level)
     console_handler.setFormatter(formatter)
     target_logger.addHandler(console_handler)
 
 
-def _add_file_handler(target_logger: logging.Logger, log_file: str, formatter: logging.Formatter) -> None:
+def _add_file_handler(
+    target_logger: logging.Logger, log_file: str, formatter: logging.Formatter
+) -> None:
     try:
         log_path = Path(log_file).parent
         log_path.mkdir(parents=True, exist_ok=True)

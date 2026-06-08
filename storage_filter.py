@@ -177,9 +177,7 @@ class CandidateFilter:
                     summary["conflict_count"] += 1
                     self.add_warning_sample(
                         warning_samples,
-                        self.existing_conflict_message(
-                            final_path, src_md5, source_md5, "同路径"
-                        ),
+                        self.existing_conflict_message(final_path, src_md5, source_md5, "同路径"),
                     )
                     continue
             elif self.filter_planned_path_conflict(
@@ -209,9 +207,7 @@ class CandidateFilter:
                 summary["conflict_count"] += 1
                 self.add_warning_sample(
                     warning_samples,
-                    self.existing_conflict_message(
-                        final_path, src_md5, target_md5, "重命名目标"
-                    ),
+                    self.existing_conflict_message(final_path, src_md5, target_md5, "重命名目标"),
                 )
                 continue
             elif source_exists:
@@ -220,9 +216,7 @@ class CandidateFilter:
                     summary["conflict_count"] += 1
                     self.add_warning_sample(
                         warning_samples,
-                        self.existing_conflict_message(
-                            clean_path, src_md5, source_md5, "源路径"
-                        ),
+                        self.existing_conflict_message(clean_path, src_md5, source_md5, "源路径"),
                     )
                     continue
 

@@ -13,9 +13,9 @@ from storage_progress import ProgressReporter
 class CandidateFilterTest(unittest.TestCase):
     def setUp(self):
         self.path_service = Mock()
-        self.path_service.normalize_path.side_effect = (
-            lambda path, file_only=False: str(path or "").strip("/")
-        )
+        self.path_service.normalize_path.side_effect = lambda path, file_only=False: str(
+            path or ""
+        ).strip("/")
         self.progress_messages = []
         self.candidate_filter = CandidateFilter(
             self.path_service,
@@ -28,9 +28,7 @@ class CandidateFilterTest(unittest.TestCase):
         summary = Counter()
         warning_samples = []
 
-        result = self.candidate_filter.filter_candidates_core(
-            [], {}, summary, warning_samples, {}
-        )
+        result = self.candidate_filter.filter_candidates_core([], {}, summary, warning_samples, {})
 
         self.assertEqual([], result)
         self.assertEqual([], warning_samples)

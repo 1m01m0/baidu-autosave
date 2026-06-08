@@ -64,7 +64,9 @@ class WorkflowStaticTests(unittest.TestCase):
         _, workflow = load_workflow(".github/workflows/baidu-transfer.yml")
         steps = workflow_steps(workflow, "transfer")
         first_attempt = next(step for step in steps if step.get("id") == "first_attempt")
-        second_attempt = next(step for step in steps if step.get("name") == "Run transfer task (Second attempt)")
+        second_attempt = next(
+            step for step in steps if step.get("name") == "Run transfer task (Second attempt)"
+        )
 
         self.assertEqual(
             "1",
@@ -78,7 +80,9 @@ class WorkflowStaticTests(unittest.TestCase):
     def test_baidu_transfer_workflow_passes_failed_state_enabled_flag(self):
         _, workflow = load_workflow(".github/workflows/baidu-transfer.yml")
         steps = workflow_steps(workflow, "transfer")
-        transfer_steps = [step for step in steps if step.get("name", "").startswith("Run transfer task")]
+        transfer_steps = [
+            step for step in steps if step.get("name", "").startswith("Run transfer task")
+        ]
 
         self.assertEqual(2, len(transfer_steps))
         for step in transfer_steps:
@@ -117,7 +121,9 @@ class WorkflowStaticTests(unittest.TestCase):
         self.assertIn('python -c "from baidupcs_py.baidupcs import BaiduPCSApi"', content)
         self.assertIn("bash scripts/install_dependencies.sh test", content)
         self.assertNotIn("print(BaiduPCSApi)", content)
-        actionlint_steps = steps_using(workflow_steps(workflow, "actionlint"), "rhysd/actionlint@v1")
+        actionlint_steps = steps_using(
+            workflow_steps(workflow, "actionlint"), "rhysd/actionlint@v1"
+        )
         self.assertEqual(1, len(actionlint_steps))
 
     def test_test_workflow_has_quality_security_job(self):
@@ -134,7 +140,9 @@ class WorkflowStaticTests(unittest.TestCase):
         self.assertIn("constraints.txt", cache_dependency_path)
         self.assertIn("bash scripts/install_dependencies.sh quality", content)
         self.assertIn("python -m compileall -q -x 'vendor/' .", content)
-        self.assertIn("python -m ruff check . --exclude vendor --select E9,F63,F7,F82", content)
+        self.assertIn("python -m ruff check .", content)
+        self.assertIn("python -m ruff format --check .", content)
+        self.assertNotIn("--select E9,F63,F7,F82", content)
         self.assertIn("python -m pip check", content)
         self.assertIn(
             "python -m pip_audit -r requirements.txt -r requirements-test.txt -r requirements-quality.txt",
@@ -243,13 +251,17 @@ class WorkflowStaticTests(unittest.TestCase):
         ):
             with self.subTest(workflow_file=workflow_file):
                 content, workflow = load_workflow(workflow_file)
-                setup_steps = steps_using(workflow_steps(workflow, job_name), "actions/setup-python@v5")
+                setup_steps = steps_using(
+                    workflow_steps(workflow, job_name), "actions/setup-python@v5"
+                )
 
                 self.assertNotIn("actions/setup-python@v4", content)
                 self.assertEqual(1, len(setup_steps))
 
         _, test_workflow = load_workflow(".github/workflows/test-on-push.yml")
-        setup_step = steps_using(workflow_steps(test_workflow, "tests"), "actions/setup-python@v5")[0]
+        setup_step = steps_using(workflow_steps(test_workflow, "tests"), "actions/setup-python@v5")[
+            0
+        ]
         self.assertEqual("${{ matrix.python-version }}", setup_step["with"]["python-version"])
 
     def test_workflows_disable_checkout_persist_credentials(self):

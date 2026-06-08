@@ -59,8 +59,7 @@ class SaveBaiduCookiesTests(unittest.TestCase):
 
     def test_mask_cookie_string_hides_cookie_values(self):
         cookie_str = (
-            "BDUSS=bduss-secret; STOKEN=token-secret; PANWEB=panweb-secret; "
-            "BIDUPSID=unknown-secret"
+            "BDUSS=bduss-secret; STOKEN=token-secret; PANWEB=panweb-secret; BIDUPSID=unknown-secret"
         )
 
         result = mask_cookie_string(cookie_str)
@@ -80,10 +79,15 @@ class SaveBaiduCookiesTests(unittest.TestCase):
             (["save_baidu_cookies.py", "--no-env-file"], False),
             (["save_baidu_cookies.py", "--no-env-file", "--show-full-cookie"], True),
         ):
-            with self.subTest(argv=argv), patch(
-                "save_baidu_cookies.do_browser_login_and_extract",
-                return_value=("BDUSS=min; STOKEN=min", "BDUSS=full; STOKEN=full"),
-            ) as login, patch("save_baidu_cookies.sys.argv", argv), patch("builtins.print"):
+            with (
+                self.subTest(argv=argv),
+                patch(
+                    "save_baidu_cookies.do_browser_login_and_extract",
+                    return_value=("BDUSS=min; STOKEN=min", "BDUSS=full; STOKEN=full"),
+                ) as login,
+                patch("save_baidu_cookies.sys.argv", argv),
+                patch("builtins.print"),
+            ):
                 main()
 
             login.assert_called_once_with(headless=False, show_full_cookie=expected)
@@ -113,8 +117,9 @@ class SaveBaiduCookiesTests(unittest.TestCase):
             config_path = Path(temp_dir) / "config.json"
             config_path.write_text('{"cookies": "BDUSS=foo", invalid', encoding="utf-8")
 
-            with patch("save_baidu_cookies.sys.exit", side_effect=SystemExit(1)), patch(
-                "builtins.print"
+            with (
+                patch("save_baidu_cookies.sys.exit", side_effect=SystemExit(1)),
+                patch("builtins.print"),
             ):
                 with self.assertRaises(SystemExit) as cm:
                     load_config(config_path)
@@ -125,8 +130,9 @@ class SaveBaiduCookiesTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "missing.json"
 
-            with patch("save_baidu_cookies.sys.exit", side_effect=SystemExit(1)), patch(
-                "builtins.print"
+            with (
+                patch("save_baidu_cookies.sys.exit", side_effect=SystemExit(1)),
+                patch("builtins.print"),
             ):
                 with self.assertRaises(SystemExit) as cm:
                     load_config(config_path)
@@ -146,16 +152,15 @@ class SaveBaiduCookiesTests(unittest.TestCase):
             result = read_env_values(env_path)
 
         self.assertEqual("BDUSS=foo; STOKEN=bar", result["BAIDU_COOKIES"])
-        self.assertEqual(
-            "BDUSS=foo; STOKEN=bar; PANWEB=baz", result["BAIDU_COOKIES_FULL"]
-        )
+        self.assertEqual("BDUSS=foo; STOKEN=bar; PANWEB=baz", result["BAIDU_COOKIES_FULL"])
 
     def test_read_env_values_exits_when_file_is_missing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             env_path = Path(temp_dir) / "missing.env"
 
-            with patch("save_baidu_cookies.sys.exit", side_effect=SystemExit(1)), patch(
-                "builtins.print"
+            with (
+                patch("save_baidu_cookies.sys.exit", side_effect=SystemExit(1)),
+                patch("builtins.print"),
             ):
                 with self.assertRaises(SystemExit) as cm:
                     read_env_values(env_path)
@@ -203,9 +208,7 @@ class SaveBaiduCookiesTests(unittest.TestCase):
                 if self.calls == 1:
                     return []
                 if self.calls == 2:
-                    return [
-                        {"name": "BDUSS", "value": "bduss-secret", "domain": "pan.baidu.com"}
-                    ]
+                    return [{"name": "BDUSS", "value": "bduss-secret", "domain": "pan.baidu.com"}]
                 return [
                     {"name": "BDUSS", "value": "bduss-secret", "domain": "pan.baidu.com"},
                     {"name": "STOKEN", "value": "stoken-secret", "domain": "pan.baidu.com"},

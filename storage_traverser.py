@@ -73,8 +73,7 @@ class DirTreeTraverser:
 
         if transfer_success_count:
             message = (
-                f"目录分治转存完成，成功 {completed_count} 项，"
-                f"跳过 {skipped_dir_count} 个目录"
+                f"目录分治转存完成，成功 {completed_count} 项，跳过 {skipped_dir_count} 个目录"
             )
             self.progress.report("success", message)
             return {
@@ -255,9 +254,7 @@ class DirTreeTraverser:
             stats,
         )
 
-        folder_name = child.get("name") or os.path.basename(
-            str(child.get("path", "")).rstrip("/")
-        )
+        folder_name = child.get("name") or os.path.basename(str(child.get("path", "")).rstrip("/"))
         child_target_dir = posixpath.join(frame.target_dir, folder_name)
         if should_exclude_folder(folder_name, exclude_folder_filter):
             stats["skipped_dir_count"] += 1

@@ -8,9 +8,13 @@ class ConfigValidatorTests(unittest.TestCase):
     def test_validate_all_returns_false_when_load_config_fails(self):
         validator = ConfigValidator("missing.json")
 
-        with patch("validate_config.load_json_config", side_effect=FileNotFoundError("配置文件不存在: missing.json")), patch(
-            "validate_config.validate_runtime_config"
-        ) as mock_validate:
+        with (
+            patch(
+                "validate_config.load_json_config",
+                side_effect=FileNotFoundError("配置文件不存在: missing.json"),
+            ),
+            patch("validate_config.validate_runtime_config") as mock_validate,
+        ):
             result = validator.validate_all()
 
         self.assertFalse(result)
@@ -19,17 +23,27 @@ class ConfigValidatorTests(unittest.TestCase):
 
     def test_validate_all_aggregates_validation_results(self):
         validator = ConfigValidator("config.json")
-        raw_config = {"cookies": "BDUSS=foo; STOKEN=bar", "share_urls": "https://pan.baidu.com/s/abc12345"}
-        validated_config = {"cookies": "BDUSS=foo; STOKEN=bar", "share_count": 1, "save_dir": "/AutoTransfer"}
+        raw_config = {
+            "cookies": "BDUSS=foo; STOKEN=bar",
+            "share_urls": "https://pan.baidu.com/s/abc12345",
+        }
+        validated_config = {
+            "cookies": "BDUSS=foo; STOKEN=bar",
+            "share_count": 1,
+            "save_dir": "/AutoTransfer",
+        }
 
-        with patch("validate_config.load_json_config", return_value=raw_config), patch(
-            "validate_config.validate_runtime_config",
-            return_value={
-                "config": validated_config,
-                "errors": [],
-                "warnings": ["warning"],
-                "info": ["info"],
-            },
+        with (
+            patch("validate_config.load_json_config", return_value=raw_config),
+            patch(
+                "validate_config.validate_runtime_config",
+                return_value={
+                    "config": validated_config,
+                    "errors": [],
+                    "warnings": ["warning"],
+                    "info": ["info"],
+                },
+            ),
         ):
             result = validator.validate_all()
 

@@ -97,13 +97,9 @@ class ConfigValidator:
 
         print(f"• 分享链接: {self.config.get('share_count', 0)} 个")
         print(f"• 保存目录: {self.config.get('save_dir', '/AutoTransfer')}")
-        print(
-            f"• 企业微信通知: {'已配置' if self.config.get('wechat_webhook') else '未配置'}"
-        )
+        print(f"• 企业微信通知: {'已配置' if self.config.get('wechat_webhook') else '未配置'}")
         print(f"• 文件过滤: {'已配置' if self.config.get('regex_pattern') else '未配置'}")
-        print(
-            f"• 文件夹过滤: {'已配置' if self.config.get('folder_filter') else '未配置'}"
-        )
+        print(f"• 文件夹过滤: {'已配置' if self.config.get('folder_filter') else '未配置'}")
 
 
 def main():

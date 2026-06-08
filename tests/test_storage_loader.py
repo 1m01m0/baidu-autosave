@@ -37,9 +37,7 @@ class ShareLoaderTest(unittest.TestCase):
 
         loader = ShareLoader(
             share_service,
-            ProgressReporter(
-                lambda level, message: progress_messages.append((level, message))
-            ),
+            ProgressReporter(lambda level, message: progress_messages.append((level, message))),
             notify_error,
         )
         return loader, share_service, progress_messages, error_notifications

@@ -10,9 +10,7 @@ from utils import handle_error_and_notify
 
 # 百度分享目录列表分页 size。官方接口实测可支持到 ~1000。
 # 默认保持 100 兼容现有测试断言；用户可通过环境变量调高来减少多页扫描的网络往返。
-_DEFAULT_SHARED_DIR_PAGE_SIZE = read_positive_int_env(
-    "TRANSFERSHARE_SHARED_PAGE_SIZE", 100
-)
+_DEFAULT_SHARED_DIR_PAGE_SIZE = read_positive_int_env("TRANSFERSHARE_SHARED_PAGE_SIZE", 100)
 
 
 class SharedPathService:
@@ -182,9 +180,7 @@ class SharedPathService:
 
     def iter_shared_dir_children(self, path, uk, share_id, bdstoken):
         dir_path = getattr(path, "path", path)
-        for _, sub_files in self._iter_shared_dir_pages(
-            dir_path, uk, share_id, bdstoken
-        ):
+        for _, sub_files in self._iter_shared_dir_pages(dir_path, uk, share_id, bdstoken):
             for sub_file in sub_files:
                 yield self._normalize_shared_child(sub_file)
 

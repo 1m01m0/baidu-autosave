@@ -115,9 +115,7 @@ class BaiduStorageDirTransferExecutor:
 
 class BaiduStorage:
     def __init__(self, cookies, wechat_webhook=None):
-        self.wechat_notifier = (
-            WeChatNotifier(wechat_webhook) if wechat_webhook else None
-        )
+        self.wechat_notifier = WeChatNotifier(wechat_webhook) if wechat_webhook else None
         self._local_files_cache = {}
         # 多链接并发场景下保护共享可变状态（_local_files_cache 的写/iter）。
         # _ensured_dirs（path_service 内）的并发竞态可以容忍——重复 makedir 走"已存在"
@@ -260,17 +258,13 @@ class BaiduStorage:
     def _handle_batch_failure(self, index, share_url, save_dir, error_msg, partial=False):
         masked_share_url = mask_share_url(share_url) or share_url
         detail_title = "批量转存中单个链接部分成功" if partial else "批量转存中单个链接失败"
-        detailed_error = (
-            f"{detail_title}\n分享链接: {masked_share_url}\n保存目录: {save_dir}\n错误信息: {error_msg}"
-        )
+        detailed_error = f"{detail_title}\n分享链接: {masked_share_url}\n保存目录: {save_dir}\n错误信息: {error_msg}"
         self._notify_error(
             ValueError(detailed_error),
             f"批量转存单个链接{'部分成功' if partial else '失败'}: 第 {index} 个链接",
         )
 
-    def _run_one_share_config_safely(
-        self, index, total_count, config, progress_callback
-    ):
+    def _run_one_share_config_safely(self, index, total_count, config, progress_callback):
         """对单个 share_config 执行 _process_single_share_config，捕获意外异常。
 
         返回 result_record（始终是 dict）；异常路径下也会构造一个失败 record。
@@ -279,15 +273,11 @@ class BaiduStorage:
         - ErrorCollector 是 thread-local，worker 内的 collect 不会污染主线程
         """
         try:
-            return self._process_single_share_config(
-                index, total_count, config, progress_callback
-            )
+            return self._process_single_share_config(index, total_count, config, progress_callback)
         except Exception as e:
             error_info = classify_storage_error(e)
             error_msg = f"处理第 {index} 个分享链接时发生异常: {error_info.message}"
-            share_url = (
-                config.get("share_url", "未知") if isinstance(config, dict) else "未知"
-            )
+            share_url = config.get("share_url", "未知") if isinstance(config, dict) else "未知"
             masked_share_url = mask_share_url(share_url) or share_url
             self._notify_batch_progress(
                 "error",
@@ -381,9 +371,9 @@ class BaiduStorage:
 
         nested_progress_callback = None
         if progress_callback:
-            nested_progress_callback = lambda level, message: self._notify_batch_progress(
-                level, index, total_count, message, progress_callback
-            )
+
+            def nested_progress_callback(level, message):
+                self._notify_batch_progress(level, index, total_count, message, progress_callback)
 
         result = self.transfer_share(
             share_url=share_url,
@@ -445,9 +435,7 @@ class BaiduStorage:
 
     def transfer_multiple_shares(self, share_configs, progress_callback=None):
         """批量转存多个分享链接"""
-        with ErrorCollector(
-            "批量转存多个分享链接", self.wechat_notifier, None, auto_send=False
-        ):
+        with ErrorCollector("批量转存多个分享链接", self.wechat_notifier, None, auto_send=False):
             if not share_configs or not isinstance(share_configs, list):
                 error_msg = "分享配置列表不能为空或格式错误"
                 self._notify_error(ValueError(error_msg), "批量转存配置错误")
@@ -522,7 +510,10 @@ class BaiduStorage:
             return {
                 "success": overall_success,
                 "partial": overall_partial or (has_partial_items and not overall_success),
-                "skipped": has_skipped and not has_success and not has_partial_items and not has_failed_items,
+                "skipped": has_skipped
+                and not has_success
+                and not has_partial_items
+                and not has_failed_items,
                 "total_count": total_count,
                 "success_count": counters["success_count"],
                 "partial_count": counters["partial_count"],
@@ -542,9 +533,7 @@ class BaiduStorage:
         """兼容旧调用方式，实际委托给共享配置工具。"""
         return parse_share_links_from_text(text, default_save_dir)
 
-    def transfer_shares_from_text(
-        self, text, default_save_dir=None, progress_callback=None
-    ):
+    def transfer_shares_from_text(self, text, default_save_dir=None, progress_callback=None):
         """
         从文本中解析并批量转存分享链接
         只支持 https://pan.baidu.com/s/xxxxx?pwd=xxxx 格式
@@ -555,9 +544,7 @@ class BaiduStorage:
         Returns:
             dict: 批量转存结果
         """
-        with ErrorCollector(
-            "从文本中解析并批量转存分享链接", self.wechat_notifier, None
-        ):
+        with ErrorCollector("从文本中解析并批量转存分享链接", self.wechat_notifier, None):
             try:
                 if progress_callback:
                     progress_callback("info", "解析文本中的分享链接...")
@@ -582,9 +569,7 @@ class BaiduStorage:
                     }
 
                 if progress_callback:
-                    progress_callback(
-                        "success", f"解析完成，找到 {len(share_configs)} 个分享链接"
-                    )
+                    progress_callback("success", f"解析完成，找到 {len(share_configs)} 个分享链接")
 
                 return self.transfer_multiple_shares(share_configs, progress_callback)
 
@@ -921,7 +906,7 @@ class BaiduStorage:
                 if normalized_dir == normalized_target:
                     affected.add("")
                 elif normalized_dir.startswith(target_prefix):
-                    affected.add(normalized_dir[len(target_prefix):])
+                    affected.add(normalized_dir[len(target_prefix) :])
         return affected
 
     def _build_transfer_failed_record(self, item, error_info):
@@ -986,9 +971,7 @@ class BaiduStorage:
                 missing_items.append(item)
                 continue
 
-            clean_normalized = self.path_service.normalize_path(
-                str(clean_path or "").lstrip("/")
-            )
+            clean_normalized = self.path_service.normalize_path(str(clean_path or "").lstrip("/"))
             final_normalized = (
                 self.path_service.normalize_path(str(final_path or "").lstrip("/"))
                 if need_rename
@@ -1076,12 +1059,16 @@ class BaiduStorage:
             progress_callback,
         )
 
-    def _rename_one_transferred_file(self, dir_path, clean_path, final_path, target_dir, progress_callback=None):
+    def _rename_one_transferred_file(
+        self, dir_path, clean_path, final_path, target_dir, progress_callback=None
+    ):
         return storage_rename.rename_one_transferred_file(
             self, dir_path, clean_path, final_path, target_dir, progress_callback
         )
 
-    def _rename_transferred_files(self, successful_transfer_items, target_dir, progress_callback=None):
+    def _rename_transferred_files(
+        self, successful_transfer_items, target_dir, progress_callback=None
+    ):
         return storage_rename.rename_transferred_files(
             self, successful_transfer_items, target_dir, progress_callback
         )
@@ -1254,9 +1241,7 @@ class BaiduStorage:
     def _handle_dir_tree_iter_error(
         self, frame, context, share_url, stats, exc, progress_callback=None
     ):
-        return self._dir_tree_traverser_with_legacy_flush(
-            progress_callback
-        ).handle_iter_error(
+        return self._dir_tree_traverser_with_legacy_flush(progress_callback).handle_iter_error(
             frame,
             context,
             share_url,
@@ -1267,9 +1252,7 @@ class BaiduStorage:
     def _handle_dir_tree_file_child(
         self, frame, child, context, share_url, stats, progress_callback=None
     ):
-        return self._dir_tree_traverser_with_legacy_flush(
-            progress_callback
-        ).handle_file_child(
+        return self._dir_tree_traverser_with_legacy_flush(progress_callback).handle_file_child(
             frame,
             child,
             context,
@@ -1288,9 +1271,7 @@ class BaiduStorage:
         stats,
         progress_callback=None,
     ):
-        return self._dir_tree_traverser_with_legacy_flush(
-            progress_callback
-        ).handle_dir_child(
+        return self._dir_tree_traverser_with_legacy_flush(progress_callback).handle_dir_child(
             stack,
             frame,
             child,
@@ -1404,14 +1385,10 @@ class BaiduStorage:
         progress_callback=None,
     ):
         stats = self._new_dir_tree_divide_stats()
-        folder_name = os.path.basename(
-            str(getattr(shared_dir, "path", shared_dir)).rstrip("/")
-        )
+        folder_name = os.path.basename(str(getattr(shared_dir, "path", shared_dir)).rstrip("/"))
         if should_exclude_folder(folder_name, exclude_folder_filter):
             stats["skipped_dir_count"] = 1
-            ProgressReporter(progress_callback).report(
-                "info", f"跳过排除目录: {folder_name}"
-            )
+            ProgressReporter(progress_callback).report("info", f"跳过排除目录: {folder_name}")
             return self._build_dir_tree_divide_result(stats, progress_callback)
 
         self._transfer_dir_tree_divide_collect(
@@ -1497,18 +1474,25 @@ class BaiduStorage:
                     try:
                         if self._target_child_exists(save_dir, folder_name):
                             if progress_callback:
-                                progress_callback("warning", "整目录直接转存失败但目标目录已存在，回退逐文件对比转存")
+                                progress_callback(
+                                    "warning",
+                                    "整目录直接转存失败但目标目录已存在，回退逐文件对比转存",
+                                )
                             return None
                     except Exception:
                         pass
                     if progress_callback:
-                        progress_callback("warning", f"整目录直接转存失败，准备重试: {error_info.message}")
+                        progress_callback(
+                            "warning", f"整目录直接转存失败，准备重试: {error_info.message}"
+                        )
                     time.sleep(TRANSFER_FAILED_RETRY_DELAY)
                     continue
                 try:
                     if self._target_child_exists(save_dir, folder_name):
                         if progress_callback:
-                            progress_callback("warning", "整目录直接转存失败但目标目录已存在，回退逐文件对比转存")
+                            progress_callback(
+                                "warning", "整目录直接转存失败但目标目录已存在，回退逐文件对比转存"
+                            )
                         return None
                 except Exception:
                     pass
@@ -1638,7 +1622,11 @@ class BaiduStorage:
                 )
                 return {"success": False, "error": error_msg}
 
-            if len(shared_paths) == 1 and hasattr(shared_paths[0], "is_dir") and shared_paths[0].is_dir:
+            if (
+                len(shared_paths) == 1
+                and hasattr(shared_paths[0], "is_dir")
+                and shared_paths[0].is_dir
+            ):
                 folder_name = os.path.basename(shared_paths[0].path)
                 return {"success": True, "folder_name": folder_name}
 
