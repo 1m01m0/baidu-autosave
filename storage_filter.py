@@ -36,6 +36,10 @@ class CandidateFilter:
         regex_replace=None,
     ):
         is_single_folder = len(shared_paths) == 1 and shared_paths[0].is_dir
+        single_folder_name = ""
+        if is_single_folder:
+            single_folder_path = str(getattr(shared_paths[0], "path", "") or "").replace("\\", "/")
+            single_folder_name = posixpath.basename(single_folder_path.rstrip("/"))
         candidates = []
         relative_dirs = set()
         summary = Counter(
@@ -51,8 +55,12 @@ class CandidateFilter:
 
         for file_info in shared_files_info:
             clean_path = file_info["path"]
-            if is_single_folder and "/" in clean_path:
-                clean_path = "/".join(clean_path.split("/")[1:])
+            if (
+                is_single_folder
+                and single_folder_name
+                and clean_path.startswith(f"{single_folder_name}/")
+            ):
+                clean_path = clean_path[len(single_folder_name) + 1 :]
 
             should_transfer, final_path, filter_reason = apply_regex_rules_detail(
                 clean_path, regex_pattern, regex_replace

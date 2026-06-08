@@ -59,6 +59,19 @@ class CandidateFilterTest(unittest.TestCase):
         self.assertEqual(1, summary["candidate_count"])
         self.assertEqual({"safe"}, relative_dirs)
 
+    def test_single_folder_keeps_already_trimmed_nested_path(self):
+        candidates, summary, relative_dirs = self.candidate_filter.prepare_candidates(
+            [{"fs_id": 1, "path": "子目录/a.txt", "md5": "md5-a"}],
+            [SimpleNamespace(is_dir=True, path="/share/course")],
+            "/save/course",
+        )
+
+        self.assertEqual("子目录/a.txt", candidates[0]["clean_path"])
+        self.assertEqual("子目录/a.txt", candidates[0]["final_path"])
+        self.assertEqual("/save/course/子目录", candidates[0]["dir_path"])
+        self.assertEqual({"子目录"}, relative_dirs)
+        self.assertEqual(1, summary["candidate_count"])
+
     def test_existing_same_path_with_same_md5_is_skipped(self):
         candidates, summary, _ = self.candidate_filter.prepare_candidates(
             [{"fs_id": 1, "path": "a.txt", "md5": "md5-a"}],
