@@ -932,35 +932,32 @@ class BaiduStorage:
         if not target_dir:
             return [], list(items)
 
-        try:
-            relative_dirs = set()
-            for _, _, clean_path, final_path, _ in items:
-                relative_dirs.update(self._candidate_parent_dirs(clean_path, final_path))
-            normalized_relative_dirs = tuple(
-                sorted(
-                    "" if relative_dir in ("", ".") else relative_dir
-                    for relative_dir in (
-                        str(relative_dir or "").replace("\\", "/").strip("/")
-                        for relative_dir in relative_dirs
-                    )
+        relative_dirs = set()
+        for _, _, clean_path, final_path, _ in items:
+            relative_dirs.update(self._candidate_parent_dirs(clean_path, final_path))
+        normalized_relative_dirs = tuple(
+            sorted(
+                "" if relative_dir in ("", ".") else relative_dir
+                for relative_dir in (
+                    str(relative_dir or "").replace("\\", "/").strip("/")
+                    for relative_dir in relative_dirs
                 )
             )
-            normalized_target_dir = self.path_service.normalize_path(target_dir)
-            cache_key = (normalized_target_dir, normalized_relative_dirs, True)
-            if force_refresh and scan_cache is not None:
-                scan_cache.clear()
-            if not force_refresh and scan_cache is not None and cache_key in scan_cache:
-                local_files_dict = scan_cache[cache_key]
-            else:
-                if force_refresh:
-                    self._clear_local_files_cache(target_dir)
-                local_files_dict = self._scan_local_files_dict(
-                    target_dir, progress_callback, set(normalized_relative_dirs)
-                )
-                if scan_cache is not None:
-                    scan_cache[cache_key] = local_files_dict
-        except Exception:
-            return [], list(items)
+        )
+        normalized_target_dir = self.path_service.normalize_path(target_dir)
+        cache_key = (normalized_target_dir, normalized_relative_dirs, True)
+        if force_refresh and scan_cache is not None:
+            scan_cache.clear()
+        if not force_refresh and scan_cache is not None and cache_key in scan_cache:
+            local_files_dict = scan_cache[cache_key]
+        else:
+            if force_refresh:
+                self._clear_local_files_cache(target_dir)
+            local_files_dict = self._scan_local_files_dict(
+                target_dir, progress_callback, set(normalized_relative_dirs)
+            )
+            if scan_cache is not None:
+                scan_cache[cache_key] = local_files_dict
 
         existing_items = []
         missing_items = []

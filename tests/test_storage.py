@@ -965,6 +965,15 @@ class StoragePathServiceTests(unittest.TestCase):
         client.list.assert_called_once_with("/考公/2026/政治理论常识背诵手册")
         notify.assert_not_called()
 
+    def test_list_local_files_propagates_non_missing_scan_error(self):
+        client = Mock()
+        client.list.side_effect = RuntimeError("network boom")
+        service = StoragePathService(client)
+
+        with patch("storage_paths.handle_error_and_notify"):
+            with self.assertRaises(RuntimeError):
+                service.list_local_files("/save", use_cache=True)
+
     def test_list_local_files_handles_deep_directory_without_recursion(self):
         client = Mock()
         depth = 150
@@ -1098,7 +1107,7 @@ class StoragePathServiceTests(unittest.TestCase):
         )
 
     def test_list_local_files_in_dirs_concurrent_propagates_worker_exception(self):
-        """并发模式下 worker 抛出的异常应被外层捕获并降级为空列表。"""
+        """并发模式下 worker 抛出的非缺失异常应向上传播。"""
         client = Mock()
         client.list.side_effect = RuntimeError("boom")
         service = StoragePathService(client)
@@ -1106,9 +1115,8 @@ class StoragePathServiceTests(unittest.TestCase):
         with patch("storage_paths.LOCAL_SCAN_CONCURRENCY", 2), patch(
             "storage_paths.handle_error_and_notify"
         ):
-            result = service.list_local_files_in_dirs("/save", {"A", "B"})
-
-        self.assertEqual([], result)
+            with self.assertRaises(RuntimeError):
+                service.list_local_files_in_dirs("/save", {"A", "B"})
 
 
 class WeChatNotifierTests(unittest.TestCase):
@@ -2910,6 +2918,14 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.storage._clear_local_files_cache.assert_called_once_with("/save")
         self.storage._scan_local_files_dict.assert_called_once_with("/save", None, {""})
         self.assertEqual({("/save", ("",), True): {"a.txt": "md5-a"}}, scan_cache)
+
+    def test_split_existing_transfer_items_propagates_scan_error(self):
+        self.storage.path_service.normalize_path.side_effect = lambda path, **kwargs: path
+        item = TransferItem(1, "/save", "a.txt", "a.txt", False, "md5-a")
+        self.storage._scan_local_files_dict = Mock(side_effect=RuntimeError("scan boom"))
+
+        with self.assertRaises(RuntimeError):
+            self.storage._split_existing_transfer_items([item], "/save")
 
     def test_execute_transfer_plan_force_refreshes_after_each_failed_attempt(self):
         self.storage.path_service.normalize_path.side_effect = lambda path, **kwargs: path

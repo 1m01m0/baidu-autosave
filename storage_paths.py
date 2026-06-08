@@ -264,46 +264,36 @@ class StoragePathService:
                 if cache_key in self._local_files_cache:
                     return [dict(item) for item in self._local_files_cache[cache_key]]
 
-        try:
-            if not self.client:
-                handle_error_and_notify(
-                    ValueError("客户端未初始化或初始化失败"),
-                    "获取本地文件列表失败: 客户端不可用",
-                    self.wechat_notifier,
-                    None,
-                    collect=False,
-                )
-                return []
-
-            base = normalized_dir_path.replace("\\", "/")
-            if not base.endswith("/"):
-                base += "/"
-            scan_plan = self._build_local_scan_plan(
-                normalized_relative_dirs, merge_dirs=merge_dirs
-            )
-
-            sorted_plan = sorted(scan_plan.items())
-            files = self._collect_local_scan_results(
-                normalized_dir_path,
-                base,
-                normalized_relative_dirs,
-                merge_dirs,
-                sorted_plan,
-            )
-
-            if use_cache:
-                with self.shared_state_lock:
-                    self._local_files_cache[cache_key] = [dict(item) for item in files]
-            return files
-        except Exception as exc:
+        if not self.client:
             handle_error_and_notify(
-                exc,
-                f"获取本地文件列表时发生异常\n目录路径: {dir_path}",
+                ValueError("客户端未初始化或初始化失败"),
+                "获取本地文件列表失败: 客户端不可用",
                 self.wechat_notifier,
                 None,
                 collect=False,
             )
             return []
+
+        base = normalized_dir_path.replace("\\", "/")
+        if not base.endswith("/"):
+            base += "/"
+        scan_plan = self._build_local_scan_plan(
+            normalized_relative_dirs, merge_dirs=merge_dirs
+        )
+
+        sorted_plan = sorted(scan_plan.items())
+        files = self._collect_local_scan_results(
+            normalized_dir_path,
+            base,
+            normalized_relative_dirs,
+            merge_dirs,
+            sorted_plan,
+        )
+
+        if use_cache:
+            with self.shared_state_lock:
+                self._local_files_cache[cache_key] = [dict(item) for item in files]
+        return files
 
     def _scan_single_relative_dir(
         self,
@@ -429,47 +419,37 @@ class StoragePathService:
                 if normalized_dir_path in self._local_files_cache:
                     return [dict(item) for item in self._local_files_cache[normalized_dir_path]]
 
-        try:
-            if not self.client:
-                handle_error_and_notify(
-                    ValueError("客户端未初始化或初始化失败"),
-                    "获取本地文件列表失败: 客户端不可用",
-                    self.wechat_notifier,
-                    None,
-                    collect=False,
-                )
-                return []
-
-            files = []
-            base = normalized_dir_path.replace("\\", "/")
-            if not base.endswith("/"):
-                base += "/"
-
-            for item in self._iter_local_tree_items(
-                normalized_dir_path,
-                missing_ok=lambda current_path: current_path == normalized_dir_path,
-            ):
-                if item.is_file:
-                    item_path = getattr(item, "path", "").replace("\\", "/")
-                    files.append(
-                        {
-                            "relative_path": self._relative_item_path(item_path, base),
-                            "file_name": os.path.basename(item_path),
-                            "md5": getattr(item, "md5", None),
-                        }
-                    )
-
-            if use_cache:
-                with self.shared_state_lock:
-                    self._local_files_cache[normalized_dir_path] = [dict(item) for item in files]
-            return files
-        except Exception as exc:
+        if not self.client:
             handle_error_and_notify(
-                exc,
-                f"获取本地文件列表时发生异常\n目录路径: {dir_path}",
+                ValueError("客户端未初始化或初始化失败"),
+                "获取本地文件列表失败: 客户端不可用",
                 self.wechat_notifier,
                 None,
                 collect=False,
             )
             return []
+
+        files = []
+        base = normalized_dir_path.replace("\\", "/")
+        if not base.endswith("/"):
+            base += "/"
+
+        for item in self._iter_local_tree_items(
+            normalized_dir_path,
+            missing_ok=lambda current_path: current_path == normalized_dir_path,
+        ):
+            if item.is_file:
+                item_path = getattr(item, "path", "").replace("\\", "/")
+                files.append(
+                    {
+                        "relative_path": self._relative_item_path(item_path, base),
+                        "file_name": os.path.basename(item_path),
+                        "md5": getattr(item, "md5", None),
+                    }
+                )
+
+        if use_cache:
+            with self.shared_state_lock:
+                self._local_files_cache[normalized_dir_path] = [dict(item) for item in files]
+        return files
 
