@@ -352,6 +352,32 @@ class BaiduClientAdapterRetryTests(unittest.TestCase):
         self.assertEqual(["ok"], result)
         self.assertEqual(2, adapter.client.list.call_count)
 
+    def test_retry_debug_log_masks_raw_error_message(self):
+        adapter = self._adapter()
+        adapter.client.list.side_effect = [
+            RuntimeError(
+                "error_code: -65 BDUSS=bduss-secret; STOKEN=stoken-secret "
+                "https://pan.baidu.com/s/abc12345?pwd=1a2B"
+            ),
+            ["ok"],
+        ]
+        logger = Mock()
+
+        with patch("storage_client.time.sleep"), patch(
+            "storage_client.get_logger", return_value=logger
+        ):
+            result = adapter.list("/save")
+
+        self.assertEqual(["ok"], result)
+        debug_text = "\n".join(str(call.args[0]) for call in logger.debug.call_args_list)
+        self.assertNotIn("bduss-secret", debug_text)
+        self.assertNotIn("stoken-secret", debug_text)
+        self.assertNotIn("abc12345", debug_text)
+        self.assertNotIn("1a2B", debug_text)
+        self.assertIn("BDUSS=***", debug_text)
+        self.assertIn("STOKEN=***", debug_text)
+        self.assertIn("https://pan.baidu.com/s/***?pwd=***", debug_text)
+
     def test_transfer_shared_paths_does_not_retry_in_adapter(self):
         adapter = self._adapter()
         adapter.client.transfer_shared_paths.side_effect = RequestsJSONDecodeError(

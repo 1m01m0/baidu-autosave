@@ -347,6 +347,47 @@ class TransferRunnerSmokeTests(unittest.TestCase):
         self.assertNotIn("need_rename", records[0]["failed_files"][0])
         self.assertEqual("rename boom", records[0]["failed_files"][0]["error"])
 
+    def test_build_failed_transfer_records_masks_sensitive_error_text(self):
+        result = {
+            "results": [
+                {
+                    "retry_config": {
+                        "share_url": "https://pan.baidu.com/s/abc12345",
+                        "save_dir": "/save",
+                        "cookies": "BDUSS=bduss-secret; STOKEN=stoken-secret",
+                    },
+                    "transfer_failed_files": [
+                        {
+                            "fs_id": 1,
+                            "clean_path": "a.txt",
+                            "error": "BDUSS=bduss-secret pwd=1a2B https://pan.baidu.com/s/abc12345",
+                            "raw_message": "drop-me",
+                        }
+                    ],
+                    "error": "STOKEN=stoken-secret key=webhook-secret",
+                    "debug": "drop-me",
+                    "traceback": "drop-me",
+                }
+            ]
+        }
+
+        records = transfer_runner.build_failed_transfer_records(result)
+
+        error_payload = json.dumps(
+            {
+                "record_error": records[0].get("error"),
+                "file_error": records[0]["failed_files"][0].get("error"),
+            },
+            ensure_ascii=False,
+        )
+        for secret in ("bduss-secret", "stoken-secret", "1a2B", "abc12345", "webhook-secret"):
+            self.assertNotIn(secret, error_payload)
+        self.assertNotIn("raw_message", json.dumps(records, ensure_ascii=False))
+        self.assertNotIn("debug", json.dumps(records, ensure_ascii=False))
+        self.assertNotIn("traceback", json.dumps(records, ensure_ascii=False))
+        self.assertIn("BDUSS=***", error_payload)
+        self.assertIn("key=***", error_payload)
+
     def test_build_failed_transfer_records_minimizes_persisted_file_fields(self):
         result = {
             "results": [

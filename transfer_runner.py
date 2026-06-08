@@ -194,9 +194,16 @@ def _default_retryable_for_error(error_info):
     return error_info.retryable
 
 
+def _sanitize_error_text(error_text):
+    if not error_text:
+        return ""
+    return mask_sensitive(error_text) or str(error_text)
+
+
 def _normalize_failed_file(failed_file, fallback_error, now):
     detail = dict(failed_file)
     error_text = detail.get("error") or fallback_error or ""
+    safe_error_text = _sanitize_error_text(error_text)
     error_info = classify_storage_error(error_text)
     error_kind = detail.get("error_kind") or error_info.kind
     retryable_default = is_storage_error_kind_retryable(
@@ -219,8 +226,8 @@ def _normalize_failed_file(failed_file, fallback_error, now):
         normalized["final_path"] = final_path
     if detail.get("need_rename") is True:
         normalized["need_rename"] = True
-    if error_text:
-        normalized["error"] = error_text
+    if safe_error_text:
+        normalized["error"] = safe_error_text
     normalized["error_kind"] = error_kind
     normalized["retryable"] = retryable
     normalized["temporary"] = temporary
@@ -260,6 +267,7 @@ def _trim_failed_record(record):
         "schema_version": record.get("schema_version") or FAILED_RECORD_SCHEMA_VERSION,
         "share_config": build_retry_share_config(record.get("share_config") or {}),
         "failed_files": normalized_files,
+        "error": _sanitize_error_text(fallback_error),
     }
     return _filter_failed_record_fields(source)
 
@@ -285,6 +293,7 @@ def build_failed_transfer_records(result, previous_records=None, increment_attem
             continue
         key = retry_share_config_key(retry_config)
         error_text = item.get("error") or item.get("message") or "转存失败"
+        safe_error_text = _sanitize_error_text(error_text)
         normalized_failed_files = _normalize_failed_files(failed_files, error_text, now)
         if not normalized_failed_files:
             continue
@@ -295,7 +304,7 @@ def build_failed_transfer_records(result, previous_records=None, increment_attem
             "schema_version": FAILED_RECORD_SCHEMA_VERSION,
             "share_config": build_retry_share_config(retry_config),
             "failed_files": normalized_failed_files,
-            "error": error_text,
+            "error": safe_error_text,
             "error_kind": normalized_failed_files[0].get("error_kind", "unknown"),
             "retryable": retryable,
             "temporary": temporary,

@@ -19,6 +19,7 @@ from baidupcs_py.baidupcs import BaiduPCSApi
 
 from env_utils import read_non_negative_int_env, read_positive_int_env
 from storage_errors import classify_storage_error
+from utils import mask_sensitive
 
 try:
     from logger import get_logger
@@ -427,8 +428,9 @@ class BaiduClientAdapter:
                 error_info = classify_storage_error(exc)
                 if error_info.retryable:
                     if attempt < self.max_retries - 1:
+                        safe_raw_message = mask_sensitive(error_info.raw_message) or error_info.message
                         logger.debug(
-                            f"可重试请求失败（第{attempt + 1}次尝试）: {error_info.raw_message}"
+                            f"可重试请求失败（第{attempt + 1}次尝试）: {safe_raw_message}"
                         )
                         continue
                     logger.warning(f"可重试请求最终失败，已重试{self.max_retries}次")
