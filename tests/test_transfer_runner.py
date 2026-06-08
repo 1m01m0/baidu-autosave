@@ -90,6 +90,20 @@ class TransferRunnerSmokeTests(unittest.TestCase):
         mock_handle_error.assert_called_once()
         mock_shutdown.assert_called_once_with(success=False)
 
+    def test_notify_transfer_result_can_be_suppressed_by_env(self):
+        notifier = Mock()
+        logger = Mock()
+
+        with patch.dict(
+            os.environ, {"TRANSFERSHARE_SUPPRESS_RESULT_NOTIFICATION": "1"}, clear=False
+        ):
+            transfer_runner.notify_transfer_result(
+                notifier, {"success": False}, {"wechat_webhook": "url"}, logger
+            )
+
+        notifier.send_transfer_result.assert_not_called()
+        logger.info.assert_called_with("已抑制本次运行的最终结果通知")
+
     def test_main_exits_when_transfer_fails(self):
         config = {
             "config_source": "file",

@@ -704,6 +704,9 @@ def log_transfer_result(logger, result):
 def notify_transfer_result(notifier, result, config, logger):
     if not notifier:
         return
+    if os.getenv("TRANSFERSHARE_SUPPRESS_RESULT_NOTIFICATION") == "1":
+        logger.info("已抑制本次运行的最终结果通知")
+        return
     logger.info("发送企业微信通知...")
     notification_sent = notifier.send_transfer_result(result, config)
     if not notification_sent:

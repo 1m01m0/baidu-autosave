@@ -89,6 +89,7 @@ jobs:
         SHARE_URLS: ${{ secrets.SHARE_URLS }}
         SAVE_DIR: ${{ secrets.SAVE_DIR }}
         WECHAT_WEBHOOK: ${{ secrets.WECHAT_WEBHOOK }}
+        TRANSFERSHARE_SUPPRESS_RESULT_NOTIFICATION: "1"
       run: |
         echo "开始执行转存任务 (第一次尝试)"
         echo "超时时间: 7 分钟"

@@ -60,6 +60,21 @@ class WorkflowStaticTests(unittest.TestCase):
         for name in ("BAIDU_COOKIES", "SHARE_URLS", "SAVE_DIR", "WECHAT_WEBHOOK"):
             self.assertIn(f"        {name}: ${{{{ secrets.{name} }}}}", content)
 
+    def test_baidu_transfer_workflow_suppresses_first_attempt_result_notification(self):
+        _, workflow = load_workflow(".github/workflows/baidu-transfer.yml")
+        steps = workflow_steps(workflow, "transfer")
+        first_attempt = next(step for step in steps if step.get("id") == "first_attempt")
+        second_attempt = next(step for step in steps if step.get("name") == "Run transfer task (Second attempt)")
+
+        self.assertEqual(
+            "1",
+            first_attempt["env"].get("TRANSFERSHARE_SUPPRESS_RESULT_NOTIFICATION"),
+        )
+        self.assertNotIn(
+            "TRANSFERSHARE_SUPPRESS_RESULT_NOTIFICATION",
+            second_attempt.get("env", {}),
+        )
+
     def test_baidu_transfer_workflow_caches_only_encrypted_failed_state(self):
         content, _ = load_workflow(".github/workflows/baidu-transfer.yml")
 
