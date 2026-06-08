@@ -279,6 +279,9 @@ class DirTreeTraverser:
             stats["transfer_success_count"] += 1
             stats["completed_count"] += 1
             stats["transferred_files"].append(folder_name)
+            clear_cache = getattr(self.transfer_executor, "clear_local_files_cache", None)
+            if clear_cache:
+                clear_cache(frame.target_dir, {folder_name})
         except Exception as exc:
             if is_transfer_count_limit_error(exc):
                 self.progress.report("warning", f"子目录超量，继续拆分: {folder_name}")

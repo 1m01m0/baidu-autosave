@@ -41,6 +41,7 @@ class FakeTransferExecutor:
         self.transfer_plan_batches = []
         self.group_calls = []
         self.group_side_effects = []
+        self.cache_clear_calls = []
 
     def execute_transfer_plan(
         self,
@@ -81,6 +82,9 @@ class FakeTransferExecutor:
                 raise effect
             return effect
         return dir_path
+
+    def clear_local_files_cache(self, target_dir, affected_relative_dirs=None):
+        self.cache_clear_calls.append((target_dir, affected_relative_dirs))
 
 
 class DirTreeTraverserTest(unittest.TestCase):
@@ -340,6 +344,7 @@ class DirTreeTraverserTest(unittest.TestCase):
         )
         self.assertEqual([("/share/course", 1, 2, "token")], share_service.calls)
         self.assertEqual([], executor.transfer_plan_batches)
+        self.assertEqual([("/save/course", {"big"})], executor.cache_clear_calls)
         self.assertEqual([], error_notifications)
 
     def test_count_limit_dir_transfer_pushes_child_to_stack(self):

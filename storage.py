@@ -109,6 +109,9 @@ class BaiduStorageDirTransferExecutor:
             self.progress_callback,
         )
 
+    def clear_local_files_cache(self, target_dir, affected_relative_dirs=None):
+        self.storage._clear_local_files_cache(target_dir, affected_relative_dirs)
+
 
 class BaiduStorage:
     def __init__(self, cookies, wechat_webhook=None):
@@ -860,7 +863,7 @@ class BaiduStorage:
 
             # 精确失效：仅清掉与受影响目录有交集的 cache key
             normalized_affected = {
-                self.path_service._normalize_relative_dir(d) for d in affected_relative_dirs
+                StoragePathService._normalize_relative_dir(d) for d in affected_relative_dirs
             }
             cache_keys = []
             for key in self._local_files_cache:
@@ -1446,40 +1449,50 @@ class BaiduStorage:
                 progress_callback,
             )
 
-        try:
-            self._transfer_group(
-                save_dir,
-                [getattr(shared_path, "fs_id")],
-                share_url,
-                context["uk"],
-                context["share_id"],
-                context["bdstoken"],
-                None,
-            )
-        except Exception as exc:
-            if is_transfer_count_limit_error(exc):
-                if progress_callback:
-                    progress_callback(
-                        "warning",
-                        "整目录直接转存超量，改用目录分治转存",
-                    )
-                return self._transfer_dir_tree_divide(
-                    shared_path,
-                    divide_target_dir,
-                    context,
-                    share_url,
-                    exclude_folder_filter,
-                    progress_callback,
-                )
+        max_attempts = 2
+        for attempt in range(max_attempts):
             try:
-                if self._target_child_exists(save_dir, folder_name):
+                self._transfer_group(
+                    save_dir,
+                    [getattr(shared_path, "fs_id")],
+                    share_url,
+                    context["uk"],
+                    context["share_id"],
+                    context["bdstoken"],
+                    None,
+                )
+                break
+            except Exception as exc:
+                if is_transfer_count_limit_error(exc):
                     if progress_callback:
-                        progress_callback("warning", "整目录直接转存失败但目标目录已存在，回退逐文件对比转存")
-                    return None
-            except Exception:
-                pass
-            raise
+                        progress_callback(
+                            "warning",
+                            "整目录直接转存超量，改用目录分治转存",
+                        )
+                    return self._transfer_dir_tree_divide(
+                        shared_path,
+                        divide_target_dir,
+                        context,
+                        share_url,
+                        exclude_folder_filter,
+                        progress_callback,
+                    )
+                error_info = classify_storage_error(exc)
+                if error_info.retryable and attempt < max_attempts - 1:
+                    if progress_callback:
+                        progress_callback("warning", f"整目录直接转存失败，准备重试: {error_info.message}")
+                    time.sleep(TRANSFER_FAILED_RETRY_DELAY)
+                    continue
+                try:
+                    if self._target_child_exists(save_dir, folder_name):
+                        if progress_callback:
+                            progress_callback("warning", "整目录直接转存失败但目标目录已存在，回退逐文件对比转存")
+                        return None
+                except Exception:
+                    pass
+                raise
 
+        self._clear_local_files_cache(save_dir, {folder_name} if folder_name else None)
         message = f"整目录直接转存成功: {folder_name or shared_path.path}"
         if progress_callback:
             progress_callback("success", message)

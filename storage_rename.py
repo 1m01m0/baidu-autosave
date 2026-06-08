@@ -30,6 +30,8 @@ def rename_one_transferred_file(
         progress_callback("info", f"重命名文件: {clean_path} -> {final_path}")
 
     storage.client.rename(original_full_path, final_full_path)
+    affected_dirs = storage._candidate_parent_dirs(clean_path, final_path)
+    storage._clear_local_files_cache(target_dir, affected_dirs)
     return final_path
 
 

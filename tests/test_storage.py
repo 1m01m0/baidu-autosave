@@ -1576,6 +1576,67 @@ class BaiduStorageFlowTests(unittest.TestCase):
             shared_url="url",
         )
 
+    def test_transfer_share_retries_dir_fast_path_temporary_error(self):
+        shared_dir = SimpleNamespace(is_dir=True, fs_id=10, path="/share/course")
+        entry_context = {
+            "shared_paths": [shared_dir],
+            "uk": 1,
+            "share_id": 2,
+            "bdstoken": "token",
+        }
+        self.storage._normalize_save_dir = Mock(return_value="/save")
+        self.storage._load_share_entries = Mock(return_value=entry_context)
+        self.storage.path_service.ensure_dir_exists.return_value = True
+        self.storage.client.list.return_value = []
+        self.storage.client.transfer_shared_paths.side_effect = [
+            RequestsJSONDecodeError("Expecting value", "", 0),
+            None,
+        ]
+
+        with patch("storage.time.sleep"):
+            result = self.storage.transfer_share("url", save_dir="/save")
+
+        self.assertTrue(result["success"])
+        self.assertTrue(result["fast_path"])
+        self.assertEqual(2, self.storage.client.transfer_shared_paths.call_count)
+
+    def test_transfer_share_clears_cache_after_dir_fast_path_success(self):
+        shared_dir = SimpleNamespace(is_dir=True, fs_id=10, path="/share/course")
+        entry_context = {
+            "shared_paths": [shared_dir],
+            "uk": 1,
+            "share_id": 2,
+            "bdstoken": "token",
+        }
+        self.storage._normalize_save_dir = Mock(return_value="/save")
+        self.storage._load_share_entries = Mock(return_value=entry_context)
+        self.storage.path_service.ensure_dir_exists.return_value = True
+        self.storage.client.list.return_value = []
+        self.storage._local_files_cache = {
+            "save": [{"relative_path": "course/a.txt"}],
+            ("save", ("course",), True): [{"relative_path": "course/a.txt"}],
+        }
+
+        result = self.storage.transfer_share("url", save_dir="/save")
+
+        self.assertTrue(result["success"])
+        self.assertEqual({}, self.storage._local_files_cache)
+
+    def test_rename_one_transferred_file_clears_affected_cache(self):
+        self.storage.path_service.ensure_dir_exists.return_value = True
+        self.storage._local_files_cache = {
+            "save": [{"relative_path": "old/a.txt"}],
+            ("save", ("old",), True): [{"relative_path": "old/a.txt"}],
+            ("save", ("new",), True): [{"relative_path": "new/a.txt"}],
+        }
+
+        result = self.storage._rename_one_transferred_file(
+            "/save/old", "old/a.txt", "new/a.txt", "/save"
+        )
+
+        self.assertEqual("new/a.txt", result)
+        self.assertEqual({}, self.storage._local_files_cache)
+
     def test_transfer_share_divides_tree_when_root_dir_hits_count_limit(self):
         shared_dir = SimpleNamespace(is_dir=True, fs_id=10, path="/share/course")
         child_file = {
