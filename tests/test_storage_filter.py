@@ -158,6 +158,30 @@ class CandidateFilterTest(unittest.TestCase):
         self.assertEqual(0, summary["rename_needed_count"])
         self.assertEqual([], warning_samples)
 
+    def test_rename_candidate_with_existing_source_same_md5_is_kept_for_retry(self):
+        candidates, summary, _ = self.candidate_filter.prepare_candidates(
+            [{"fs_id": 1, "path": "old/a.txt", "md5": "src-md5"}],
+            [SimpleNamespace(is_dir=False)],
+            "/save",
+            regex_pattern=r"old",
+            regex_replace="new",
+        )
+        warning_samples = []
+
+        result = self.candidate_filter.filter_candidates_core(
+            candidates, {"old/a.txt": "src-md5"}, summary, warning_samples, {}
+        )
+
+        self.assertEqual(1, len(result))
+        self.assertEqual("old/a.txt", result[0].clean_path)
+        self.assertEqual("new/a.txt", result[0].final_path)
+        self.assertTrue(result[0].need_rename)
+        self.assertEqual(1, summary["existing_count"])
+        self.assertEqual(0, summary["conflict_count"])
+        self.assertEqual(1, summary["transfer_needed_count"])
+        self.assertEqual(1, summary["rename_needed_count"])
+        self.assertEqual([], warning_samples)
+
     def test_duplicate_planned_paths_keep_first_transfer_item(self):
         candidates, summary, _ = self.candidate_filter.prepare_candidates(
             [

@@ -301,6 +301,38 @@ class TransferRunnerSmokeTests(unittest.TestCase):
         self.assertEqual("missing_path", records[0]["error_kind"])
         self.assertFalse(records[0]["failed_files"][0]["retryable"])
 
+    def test_build_failed_transfer_records_collects_rename_failures(self):
+        result = {
+            "results": [
+                {
+                    "retry_config": {
+                        "share_url": "https://pan.baidu.com/s/abc12345",
+                        "save_dir": "/save",
+                        "regex_pattern": "old",
+                        "regex_replace": "new",
+                    },
+                    "rename_failed_files": [
+                        {
+                            "source_path": "old/a.txt",
+                            "target_path": "new/a.txt",
+                            "error": "rename boom",
+                        }
+                    ],
+                    "error": "重命名失败",
+                }
+            ]
+        }
+
+        records = transfer_runner.build_failed_transfer_records(result)
+
+        self.assertEqual(1, len(records))
+        self.assertTrue(records[0]["retryable"])
+        self.assertEqual("rename_failed", records[0]["error_kind"])
+        self.assertEqual("old/a.txt", records[0]["failed_files"][0]["clean_path"])
+        self.assertEqual("new/a.txt", records[0]["failed_files"][0]["final_path"])
+        self.assertNotIn("need_rename", records[0]["failed_files"][0])
+        self.assertEqual("rename boom", records[0]["failed_files"][0]["error"])
+
     def test_build_failed_transfer_records_minimizes_persisted_file_fields(self):
         result = {
             "results": [

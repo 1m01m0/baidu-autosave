@@ -2933,6 +2933,23 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.assertEqual([], failed_items)
         self.assertEqual(2, self.storage._scan_local_files_dict.call_count)
 
+    def test_execute_transfer_plan_renames_existing_source_without_retransfer(self):
+        self.storage.path_service.normalize_path.side_effect = lambda path, **kwargs: path
+        transfer_item = TransferItem(
+            1, "/save/old", "old/a.txt", "new/a.txt", True, "md5-a"
+        )
+        self.storage._scan_local_files_dict = Mock(return_value={"old/a.txt": "md5-a"})
+
+        success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
+            [transfer_item], "url", 1, 2, "token", "/save"
+        )
+
+        self.assertEqual(1, success_count)
+        self.assertEqual([transfer_item], successful_items)
+        self.assertEqual([], failed_items)
+        self.storage.client.transfer_shared_paths.assert_not_called()
+        self.storage._scan_local_files_dict.assert_called_once_with("/save", None, {"new", "old"})
+
     def test_rename_transferred_files_sleeps_only_between_renames(self):
         self.storage.path_service.ensure_dir_exists.return_value = True
         transfer_items = [

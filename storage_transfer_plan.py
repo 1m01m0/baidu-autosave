@@ -91,6 +91,15 @@ def execute_transfer_plan(
             failed_records.pop(key, None)
             successful_transfer_items.append(item)
 
+    if any(item[4] for item in pending_items):
+        existing_items, pending_items = storage._split_existing_transfer_items(
+            pending_items,
+            target_dir,
+            progress_callback,
+            scan_cache,
+        )
+        add_successful_items(existing_items)
+
     try:
         while pending_items and attempt <= max_attempt:
             batch_size = current_batch_size

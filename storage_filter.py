@@ -216,16 +216,15 @@ class CandidateFilter:
                 continue
             elif source_exists:
                 summary["existing_count"] += 1
-                if self.is_verified_same_file(src_md5, source_md5):
+                if not self.is_verified_same_file(src_md5, source_md5):
+                    summary["conflict_count"] += 1
+                    self.add_warning_sample(
+                        warning_samples,
+                        self.existing_conflict_message(
+                            clean_path, src_md5, source_md5, "源路径"
+                        ),
+                    )
                     continue
-                summary["conflict_count"] += 1
-                self.add_warning_sample(
-                    warning_samples,
-                    self.existing_conflict_message(
-                        clean_path, src_md5, source_md5, "源路径"
-                    ),
-                )
-                continue
 
             if candidate["dir_path"] is None or clean_path is None:
                 continue

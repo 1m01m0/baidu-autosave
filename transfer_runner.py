@@ -211,12 +211,14 @@ def _normalize_failed_file(failed_file, fallback_error, now):
     for key in ("fs_id", "dir_path"):
         if detail.get(key) not in (None, ""):
             normalized[key] = detail[key]
-    clean_path = detail.get("clean_path") or detail.get("path")
+    clean_path = detail.get("clean_path") or detail.get("source_path") or detail.get("path")
     if clean_path:
         normalized["clean_path"] = clean_path
-    final_path = detail.get("final_path")
+    final_path = detail.get("final_path") or detail.get("target_path")
     if final_path:
         normalized["final_path"] = final_path
+    if detail.get("need_rename") is True:
+        normalized["need_rename"] = True
     if error_text:
         normalized["error"] = error_text
     normalized["error_kind"] = error_kind
@@ -272,7 +274,13 @@ def build_failed_transfer_records(result, previous_records=None, increment_attem
         if not isinstance(item, dict):
             continue
         retry_config = item.get("retry_config")
-        failed_files = item.get("transfer_failed_files", [])
+        failed_files = list(item.get("transfer_failed_files", []) or [])
+        rename_failed_files = [
+            {**failed_file, "need_rename": True, "error_kind": "rename_failed"}
+            for failed_file in (item.get("rename_failed_files", []) or [])
+            if isinstance(failed_file, dict)
+        ]
+        failed_files.extend(rename_failed_files)
         if not retry_config or not failed_files:
             continue
         key = retry_share_config_key(retry_config)
