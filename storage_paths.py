@@ -7,6 +7,7 @@ import threading
 import time
 
 from env_utils import read_positive_int_env
+from storage_metrics import emit_storage_metric
 from storage_errors import (
     classify_storage_error,
     is_already_exists_error,
@@ -276,12 +277,23 @@ class StoragePathService:
         scan_plan = self._build_local_scan_plan(normalized_relative_dirs, merge_dirs=merge_dirs)
 
         sorted_plan = sorted(scan_plan.items())
+        start_time = time.monotonic()
         files = self._collect_local_scan_results(
             normalized_dir_path,
             base,
             normalized_relative_dirs,
             merge_dirs,
             sorted_plan,
+        )
+        elapsed_ms = (time.monotonic() - start_time) * 1000
+        emit_storage_metric(
+            "local_dir_list",
+            dir_path=normalized_dir_path,
+            relative_dirs=sorted(normalized_relative_dirs),
+            merge_dirs=bool(merge_dirs),
+            scanned=len(sorted_plan),
+            files=len(files),
+            elapsed_ms=round(elapsed_ms, 3),
         )
 
         if use_cache:

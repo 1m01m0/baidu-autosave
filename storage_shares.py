@@ -4,6 +4,7 @@
 import os
 
 from env_utils import read_positive_int_env
+from storage_metrics import emit_storage_metric
 from storage_rules import extract_file_info, should_exclude_folder, should_include_folder
 from utils import handle_error_and_notify
 
@@ -11,10 +12,17 @@ from utils import handle_error_and_notify
 # 百度分享目录列表分页 size。官方接口实测可支持到 ~1000。
 # 默认保持 100 兼容现有测试断言；用户可通过环境变量调高来减少多页扫描的网络往返。
 _DEFAULT_SHARED_DIR_PAGE_SIZE = read_positive_int_env("TRANSFERSHARE_SHARED_PAGE_SIZE", 100)
+# 大页短页探测开关。当用户主动调大 page_size 后，若服务端静默截断（例如
+# 请求 size=1000 但只返回 100），默认的 "len < page_size 即停止" 会导致漏扫。
+# 设为 1 后，遇到非空短页继续请求下一页直到出现空页；默认 0 关闭保持旧行为。
+_DEFAULT_SHARED_DIR_PAGE_PROBE_ON_SHORT = (
+    read_positive_int_env("TRANSFERSHARE_SHARED_PAGE_PROBE_ON_SHORT", 0) >= 1
+)
 
 
 class SharedPathService:
     SHARED_DIR_PAGE_SIZE = _DEFAULT_SHARED_DIR_PAGE_SIZE
+    SHARED_DIR_PAGE_PROBE_ON_SHORT = _DEFAULT_SHARED_DIR_PAGE_PROBE_ON_SHORT
     PROGRESS_DIR_INTERVAL = 20
     PROGRESS_PAGE_INTERVAL = 20
     PROGRESS_FILE_INTERVAL = 500
@@ -161,6 +169,13 @@ class SharedPathService:
     def _iter_shared_dir_pages(self, dir_path, uk, share_id, bdstoken):
         page = 1
         page_size = self.SHARED_DIR_PAGE_SIZE
+        probe_on_short = getattr(
+            self, "SHARED_DIR_PAGE_PROBE_ON_SHORT", _DEFAULT_SHARED_DIR_PAGE_PROBE_ON_SHORT
+        )
+        last_yielded_page = 0
+        total_pages_yielded = 0
+        last_page_count = 0
+        last_page_key = None
 
         while True:
             sub_paths = self.client.list_shared_paths(
@@ -173,10 +188,30 @@ class SharedPathService:
             else:
                 break
 
+            page_key = tuple(
+                getattr(item, "fs_id", getattr(item, "path", item)) for item in sub_files
+            )
+            last_yielded_page = page
+            total_pages_yielded += 1
+            last_page_count = len(sub_files)
             yield page, sub_files
-            if len(sub_files) < page_size:
+            if not sub_files:
+                break
+            if page_key == last_page_key:
+                break
+            last_page_key = page_key
+            if last_page_count < page_size and not probe_on_short:
                 break
             page += 1
+
+        emit_storage_metric(
+            "shared_dir_pages",
+            dir_path=dir_path,
+            page_size=page_size,
+            pages=total_pages_yielded,
+            last_page=last_yielded_page,
+            last_page_count=last_page_count,
+        )
 
     def iter_shared_dir_children(self, path, uk, share_id, bdstoken):
         dir_path = getattr(path, "path", path)
