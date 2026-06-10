@@ -3,6 +3,7 @@
 
 import time
 
+from storage_metrics import emit_storage_metric
 from storage_constants import (
     RATE_LIMIT_WAIT_TIME,
     TRANSFER_BATCH_SIZE,
@@ -146,6 +147,12 @@ def execute_transfer_plan(
                                 "warning",
                                 f"触发频率限制，等待{RATE_LIMIT_WAIT_TIME}秒后重试...",
                             )
+                        emit_storage_metric(
+                            "rate_limit_sleep",
+                            dir_path=dir_path,
+                            fs_ids=len(fs_ids),
+                            sleep_seconds=RATE_LIMIT_WAIT_TIME,
+                        )
                         time.sleep(RATE_LIMIT_WAIT_TIME)
                         try:
                             normalized_dir_path = storage._transfer_group(
@@ -183,7 +190,7 @@ def execute_transfer_plan(
                                 collect=True,
                             )
                         force_refresh = local_files_cache_dirty
-                        existing_items, missing_items = storage._split_existing_transfer_items(
+                        existing_items, missing_items = storage._verify_existing_for_batch(
                             batch_items,
                             target_dir,
                             progress_callback,
