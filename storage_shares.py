@@ -191,15 +191,19 @@ class SharedPathService:
             page_key = tuple(
                 getattr(item, "fs_id", getattr(item, "path", item)) for item in sub_files
             )
-            last_yielded_page = page
-            total_pages_yielded += 1
-            last_page_count = len(sub_files)
-            yield page, sub_files
             if not sub_files:
+                last_yielded_page = page
+                total_pages_yielded += 1
+                last_page_count = 0
+                yield page, sub_files
                 break
             if page_key == last_page_key:
                 break
             last_page_key = page_key
+            last_yielded_page = page
+            total_pages_yielded += 1
+            last_page_count = len(sub_files)
+            yield page, sub_files
             if last_page_count < page_size and not probe_on_short:
                 break
             page += 1

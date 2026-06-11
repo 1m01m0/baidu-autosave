@@ -950,7 +950,7 @@ class BaiduStorage:
         normalized_target_dir = self.path_service.normalize_path(target_dir)
         cache_key = (normalized_target_dir, normalized_relative_dirs, True)
         if force_refresh and scan_cache is not None:
-            scan_cache.clear()
+            scan_cache.pop(cache_key, None)
         if not force_refresh and scan_cache is not None and cache_key in scan_cache:
             local_files_dict = scan_cache[cache_key]
         else:
@@ -1029,7 +1029,7 @@ class BaiduStorage:
         normalized_target_dir = self.path_service.normalize_path(target_dir)
         cache_key = (normalized_target_dir, normalized_relative_dirs, True)
         if force_refresh and scan_cache is not None:
-            scan_cache.clear()
+            scan_cache.pop(cache_key, None)
         if not force_refresh and scan_cache is not None and cache_key in scan_cache:
             local_files_dict = scan_cache[cache_key]
         else:

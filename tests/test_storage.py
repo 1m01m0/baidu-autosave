@@ -3858,7 +3858,7 @@ class SharedPathServicePaginationSafetyTests(unittest.TestCase):
 
         pages = list(self.service._iter_shared_dir_pages("/a", 1, 2, "token"))
 
-        self.assertEqual(2, len(pages))
+        self.assertEqual(1, len(pages))
 
 
 class SharedPathServiceMetricsTests(unittest.TestCase):
