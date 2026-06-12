@@ -1,567 +1,352 @@
 <!-- markdownlint-disable MD033 MD041 -->
 <div align="center">
 
-# 🚀 百度网盘自动转存 GitHub Actions
+# 🚀 TransferShare — 百度网盘自动转存工具
 
-**基于 GitHub Actions 的百度网盘自动转存工具，每六小时自动执行转存任务**
+**Baidu Pan Auto Transfer | 基于 GitHub Actions 的全自动网盘转存方案**
 
-[![Python Version](https://img.shields.io/badge/Python-3.9%2B-blue?style=for-the-badge)](https://www.python.org/)
-[![GitHub Actions](https://img.shields.io/badge/GitHub-Actions-orange?style=for-the-badge&logo=github)](https://github.com/features/actions)
-[![License](https://img.shields.io/github/license/Jack261108/transfershare?style=for-the-badge)](LICENSE)
-[![Build Status](https://img.shields.io/github/actions/workflow/status/Jack261108/transfershare/baidu-transfer.yml?style=for-the-badge)](https://github.com/Jack261108/transfershare/actions/workflows/baidu-transfer.yml)
+[![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![GitHub Actions](https://img.shields.io/badge/GitHub_Actions-Automation-2088FF?style=for-the-badge&logo=github-actions&logoColor=white)](https://github.com/features/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
+[![Tests](https://img.shields.io/badge/Tests-Passing-brightgreen?style=for-the-badge)](https://github.com/Jack261108/transfershare/actions/workflows/test-on-push.yml)
+[![Code Style: Ruff](https://img.shields.io/badge/Code_Style-Ruff-D7FF64?style=for-the-badge&logo=ruff&logoColor=D7FF64)](https://docs.astral.sh/ruff/)
+
+[English](#english) | [中文](#中文文档)
 
 </div>
 
-## 🌟 项目亮点
+---
+
+<a id="english"></a>
+
+## What is TransferShare?
+
+TransferShare is an **open-source, zero-cost automation tool** that periodically saves files from [Baidu Pan](https://pan.baidu.com) share links into your own Baidu Pan storage — powered entirely by **GitHub Actions** (no server needed).
+
+**Use cases:**
+- 🎓 Auto-save course materials from shared folders
+- 📚 Build a personal library from community shares
+- 🔄 Keep shared resources synced to your own drive
+- 📦 Batch archive shared links with custom filters
+
+### Key Features
+
+| Feature | Description |
+|---------|-------------|
+| ⏰ **Scheduled Execution** | Runs automatically every 6 hours via GitHub Actions cron — set and forget |
+| 🔐 **Password-Protected Links** | Full support for share links with extraction codes (`?pwd=xxxx`) |
+| 📦 **Batch Processing** | Transfer hundreds of share links in a single run |
+| 🧠 **Smart Deduplication** | Skips already-existing files by MD5 comparison — no duplicate downloads |
+| 📁 **Per-Link Configuration** | Each link can have its own save directory, filter rules, and rename patterns |
+| 🔍 **Regex Filtering** | Filter files by name pattern; filter folders by regex; exclude unwanted content |
+| ✏️ **Auto Rename** | Rename files during transfer using regex capture groups |
+| 📱 **WeChat Notifications** | Get notified via Enterprise WeChat webhook when transfers complete |
+| 🔁 **Failure Retry** | Failed transfers are automatically retried across runs with encrypted state |
+| 🔒 **Security First** | Cookies are masked in logs; state files are encrypted; minimal permissions |
+| ⚡ **Tunable Concurrency** | Configurable parallel workers for multi-share, rename, and scanning operations |
+| 🛡️ **Robust Error Handling** | Classified errors (network / rate-limit / cookie-invalid) with smart retry logic |
+
+### Quick Start
+
+```mermaid
+graph LR
+    A["🍴 Fork this repo"] --> B["🔑 Set Secrets"]
+    B --> C["✅ Enable Actions"]
+    C --> D["🤖 Auto-runs every 6h"]
+    D --> E["📱 Get notified"]
+```
+
+**Step 1 — Fork** this repository
+
+**Step 2 — Get your Baidu Pan cookies** (BDUSS + STOKEN):
+```bash
+# Option A: Use the built-in browser helper (recommended)
+pip install -r requirements-playwright.txt && python -m playwright install
+python save_baidu_cookies.py --repo YOUR_USERNAME/transfershare
+
+# Option B: Manual — open pan.baidu.com → F12 → Application → Cookies → copy BDUSS & STOKEN
+```
+
+**Step 3 — Configure GitHub Secrets** (`Settings → Secrets → Actions`):
+
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `BAIDU_COOKIES` | ✅ | `BDUSS=xxx; STOKEN=xxx` |
+| `SHARE_URLS` | ✅ | Share links, one per line (see [format](#share-link-format)) |
+| `SAVE_DIR` | | Default save directory (default: `/AutoTransfer`) |
+| `WECHAT_WEBHOOK` | | Enterprise WeChat webhook URL |
+| `TRANSFERSHARE_STATE_KEY` | | Encryption key for cross-run failure state (`openssl rand -base64 32`) |
+
+**Step 4 — Done!** The workflow runs at UTC 0:17, 6:17, 12:17, 18:17 automatically. Or trigger manually from the Actions tab.
+
+### Example Config (`config.json` for local runs)
+
+```json
+{
+  "cookies": "BDUSS=xxx; STOKEN=xxx",
+  "share_urls": [
+    "https://pan.baidu.com/s/xxxxx?pwd=abcd /Courses/Math",
+    "https://pan.baidu.com/s/yyyyy?pwd=efgh",
+    {
+      "share_url": "https://pan.baidu.com/s/zzzzz?pwd=ijkl",
+      "save_dir": "/Videos",
+      "folder_filter": "2024|2025",
+      "regex_pattern": "\\.(mp4|mkv)$"
+    }
+  ],
+  "save_dir": "/AutoTransfer",
+  "wechat_webhook": ""
+}
+```
+
+> 📖 Full configuration reference: [CONFIG_GUIDE.md](CONFIG_GUIDE.md)
+
+---
+
+<a id="中文文档"></a>
+
+## TransferShare 是什么？
+
+TransferShare 是一个**开源、免费**的百度网盘自动转存工具。它利用 **GitHub Actions** 定时任务，每隔六小时自动将分享链接中的文件转存到你自己的网盘中 —— **无需服务器，无需付费**。
+
+**适用场景：**
+- 🎓 自动转存课程资料、学习资源
+- 📚 从社群分享链接构建个人资源库
+- 🔄 定期同步共享文件夹的更新内容
+- 📦 批量归档带过滤条件的分享链接
+
+## ✨ 项目亮点
 
 <div align="center">
 
 | 特性 | 描述 |
 |------|------|
-| 🤖 **自动化** | 每六小时自动执行转存任务 |
-| 🔐 **密码支持** | 完美支持带密码的分享链接 |
-| 📦 **批量处理** | 一次性转存多个分享链接 |
-| 📁 **灵活保存** | 可为每个链接指定保存目录 |
-| 🧠 **智能去重** | 自动跳过已存在的文件 |
-| 📊 **进度跟踪** | 实时查看转存进度和结果 |
-| 📱 **即时通知** | 企业微信机器人实时通知 |
+| ⏰ **定时自动执行** | 基于 GitHub Actions cron，每 6 小时自动运行，无需人工干预 |
+| 🔐 **密码链接支持** | 完美支持带提取码的分享链接 |
+| 📦 **批量转存** | 一次运行可处理上百个分享链接 |
+| 🧠 **智能去重** | 通过 MD5 对比自动跳过已存在的文件 |
+| 📁 **逐链接配置** | 每个链接可独立设置保存目录、过滤规则、重命名模式 |
+| 🔍 **正则过滤** | 支持文件名正则过滤、文件夹正则过滤、排除规则 |
+| ✏️ **自动重命名** | 通过正则捕获组在转存时重命名文件 |
+| 📱 **企业微信通知** | 转存完成后通过企业微信 Webhook 推送结果 |
+| 🔁 **失败自动重试** | 失败任务加密持久化，下次运行自动重试 |
+| 🔒 **安全优先** | Cookie 日志脱敏、状态文件加密、最小权限原则 |
+| ⚡ **并发可调** | 多链接并发、重命名并发、扫描并发均可配置 |
+| 🛡️ **健壮的错误处理** | 按错误类型分类（网络/限频/Cookie失效），智能重试策略 |
 
 </div>
 
-## 📚 目录
-
-<details>
-<summary>点击展开目录</summary>
-
-- [✨ 快速开始](#-快速开始)
-- [🔧 环境准备](#-环境准备)
-- [⚙️ 详细配置](#️-详细配置)
-- [▶️ 使用方法](#️-使用方法)
-- [🔗 分享链接格式](#-分享链接格式说明)
-- [🎯 高级功能](#-高级功能)
-- [🛠 故障排除](#-故障排除)
-- [⚠️ 注意事项](#️-注意事项)
-- [📄 许可证](#-许可证)
-- [🤝 贡献](#-贡献)
-
-</details>
-
-## ✨ 快速开始
-
-只需简单几步，即可开始自动转存百度网盘文件：
+## 🚀 快速开始
 
 ```mermaid
 graph LR
-    A[Fork 仓库] --> B[配置 Secrets]
-    B --> C[启用 Actions]
-    C --> D[自动转存]
-    D --> E[接收通知]
+    A["🍴 Fork 仓库"] --> B["🔑 配置 Secrets"]
+    B --> C["✅ 启用 Actions"]
+    C --> D["🤖 每 6 小时自动运行"]
+    D --> E["📱 接收通知"]
 ```
 
-## 🔧 环境准备
+### 第一步：Fork 仓库
 
-### 运行依赖安装
+点击右上角 **Fork** 按钮，将仓库复制到你的 GitHub 账户。
 
-主程序 `transfer_runner.py` 依赖 `vendor/BaiduPCS-Py` 子模块，请先初始化子模块再安装依赖：
+### 第二步：获取百度网盘 Cookies
+
+**推荐方式 — 脚本自动获取：**
+```bash
+pip install -r requirements-playwright.txt && python -m playwright install
+python save_baidu_cookies.py --repo YOUR_USERNAME/transfershare
+```
+脚本会打开浏览器，扫码登录后自动提取 Cookie 并写入 GitHub Secrets。
+
+**手动方式：**
+1. 登录 [百度网盘网页版](https://pan.baidu.com)
+2. 按 `F12` 打开开发者工具
+3. `Application` → `Cookies` → `https://pan.baidu.com`
+4. 复制 `BDUSS` 和 `STOKEN` 的值
+5. 组合格式：`BDUSS=你的BDUSS值; STOKEN=你的STOKEN值`
+
+### 第三步：配置 GitHub Secrets
+
+进入 `Settings` → `Secrets and variables` → `Actions`，添加以下 Secrets：
+
+| Secret 名称 | 必需 | 说明 |
+|-------------|------|------|
+| `BAIDU_COOKIES` | ✅ | 百度网盘 Cookies，格式：`BDUSS=xxx; STOKEN=xxx` |
+| `SHARE_URLS` | ✅ | 分享链接列表，每行一个（格式见下方说明） |
+| `SAVE_DIR` | | 默认保存目录，默认 `/AutoTransfer` |
+| `WECHAT_WEBHOOK` | | 企业微信机器人 Webhook URL |
+| `TRANSFERSHARE_STATE_KEY` | | 加密失败清单的密钥，用 `openssl rand -base64 32` 生成 |
+
+<a id="share-link-format"></a>
+
+### 分享链接格式
+
+```
+# 基本格式
+https://pan.baidu.com/s/xxxxxx?pwd=abcd
+
+# 指定保存目录（链接后加空格和目录路径）
+https://pan.baidu.com/s/xxxxxx?pwd=abcd /我的资源/课程
+
+# 对象格式（高级，可单独配置过滤规则）
+{
+  "share_url": "https://pan.baidu.com/s/xxxxxx",
+  "pwd": "abcd",
+  "save_dir": "/视频",
+  "folder_filter": "2024|2025",
+  "regex_pattern": "\\.(mp4|mkv)$"
+}
+```
+
+### 第四步：完成！
+
+工作流会自动在 UTC 时间 0:17、6:17、12:17、18:17 运行。也可以在 Actions 页面手动触发。
+
+## ⚙️ 详细配置
+
+### config.json（本地运行优先读取）
+
+程序优先读取项目根目录的 `config.json`，文件不存在时回退到环境变量。
+
+**简单配置：**
+```json
+{
+  "cookies": "BDUSS=xxx; STOKEN=xxx",
+  "share_urls": [
+    "https://pan.baidu.com/s/xxxxx?pwd=abcd /资料",
+    "https://pan.baidu.com/s/yyyyy?pwd=efgh"
+  ],
+  "save_dir": "/AutoTransfer"
+}
+```
+
+**带全局过滤：**
+```json
+{
+  "cookies": "BDUSS=xxx; STOKEN=xxx",
+  "share_urls": [
+    "https://pan.baidu.com/s/xxxxx?pwd=abcd /课程"
+  ],
+  "save_dir": "/AutoTransfer",
+  "folder_filter": "2024|2025",
+  "regex_pattern": "\\.(pdf|epub)$"
+}
+```
+
+**逐链接配置：**
+```json
+{
+  "cookies": "BDUSS=xxx; STOKEN=xxx",
+  "save_dir": "/AutoTransfer",
+  "share_urls": [
+    {
+      "share_url": "https://pan.baidu.com/s/xxxxx?pwd=abcd",
+      "save_dir": "/视频课程",
+      "folder_filter": "高级班",
+      "regex_pattern": "\\.(mp4|mkv)$"
+    },
+    {
+      "share_url": "https://pan.baidu.com/s/yyyyy?pwd=efgh",
+      "save_dir": "/电子书",
+      "regex_pattern": "\\.(pdf|epub)$"
+    }
+  ]
+}
+```
+
+> 📖 完整配置文档请参考 [CONFIG_GUIDE.md](CONFIG_GUIDE.md)
+
+### 高级功能
+
+#### 文件夹过滤
+
+```json
+{
+  "folder_filter": "2024|2025",
+  "exclude_folder_filter": "预告|花絮"
+}
+```
+- `folder_filter`：只转存匹配的文件夹（支持字符串或数组）
+- `exclude_folder_filter`：跳过匹配的文件夹
+
+#### 文件过滤与重命名
+
+```json
+{
+  "regex_pattern": ".*课程(\\d+).*\\.mp4$",
+  "regex_replace": "第\\1课.mp4"
+}
+```
+- 只设置 `regex_pattern`：过滤文件（只转存匹配的）
+- 同时设置 `regex_replace`：过滤 + 重命名
+
+#### 性能调优
+
+| 环境变量 | 默认值 | 说明 |
+|---------|--------|------|
+| `TRANSFERSHARE_MULTI_SHARE_CONCURRENCY` | `1` | 多链接并发数（建议 ≤ 4） |
+| `TRANSFERSHARE_RENAME_CONCURRENCY` | `1` | 重命名并发数 |
+| `TRANSFERSHARE_LOCAL_SCAN_CONCURRENCY` | `1` | 本地扫描并发数 |
+| `TRANSFERSHARE_TRANSFER_PIPELINE` | `1` | 流水线双缓冲开关 |
+| `TRANSFERSHARE_PCS_POOL_MAXSIZE` | 自动 | HTTP 连接池大小 |
+
+推荐启用顺序：先开 `RENAME_CONCURRENCY=4`，再开 `MULTI_SHARE_CONCURRENCY=2~4`。
+
+## 🏗️ 本地运行
 
 ```bash
+# 克隆仓库
+git clone https://github.com/Jack261108/transfershare.git
+cd transfershare
+
+# 初始化子模块并安装依赖
 git submodule update --init --recursive
 pip install -r requirements.txt
 ./scripts/build_baidupcs_submodule.sh
+
+# 配置
+cp config.example.json config.json
+# 编辑 config.json 填入你的 cookies 和分享链接
+
+# 运行
+python transfer_runner.py
+# 或使用包装脚本（推荐，自动处理子模块构建和 PYTHONPATH）
+./scripts/run_transfer_task.sh
 ```
 
 ### 运行测试
 
-最小测试集基于 Python 标准库 `unittest`，不依赖 `pytest`。
-
 ```bash
-# 安装测试依赖
 pip install -r requirements-test.txt
-
-# 运行全部测试
 python -m unittest discover -s tests -p "test_*.py"
-
-# 单独运行 transfer_runner 冒烟测试
-python -m unittest tests.test_transfer_runner
 ```
-
-### 可选：Playwright（仅用于获取 Cookies 的辅助脚本）
-
-`requirements-playwright.txt` 只用于 `save_baidu_cookies.py`，不运行主转存任务时可不安装。
-
-```bash
-pip install -r requirements-playwright.txt
-python -m playwright install
-```
-
-> 不使用脚本获取 Cookies 的用户，可跳过此步骤。
-
-### 使用脚本一键获取 Cookies 并可选写入 Secrets（推荐）
-
-脚本：`save_baidu_cookies.py` — 通过真实浏览器登录百度网盘，自动提取 Cookie，并可写入本地 env 文件或 GitHub Secrets。
-
-先决条件：
-- pip install playwright
-- python -m playwright install
-- 写入 Secrets 需要 GitHub CLI：brew install gh && gh auth login
-
-常用用法：
-
-```bash
-# 1) 获取并写入 GitHub Secrets（会弹出浏览器扫码/登录）
-python save_baidu_cookies.py --repo owner/repo
-
-# 2) 仅获取并写入本地 env（默认 baidu_cookies.env）
-python save_baidu_cookies.py
-
-# 3) 从已有 env 写入 Secrets（不启浏览器）
-python save_baidu_cookies.py --repo owner/repo --from-env --env baidu_cookies.env
-
-# 4) 只写最小或全量 Secrets（与 --repo 搭配使用）
-python save_baidu_cookies.py --repo owner/repo --min-only
-python save_baidu_cookies.py --repo owner/repo --full-only
-
-# 5) 无头模式（不推荐，扫码不便）
-python save_baidu_cookies.py --headless
-```
-
-脚本行为说明：
-- 最小必需变量 BAIDU_COOKIES：仅包含 BDUSS 与 STOKEN，格式 `BDUSS=...; STOKEN=...`
-- 全量变量 BAIDU_COOKIES_FULL：将全部 Cookie 合并（优先 pan.baidu.com 域），格式 `name=value; name2=value2`
-- 默认会将抓取结果写入本地 `baidu_cookies.env`，可配合 `--from-env` 再写入 Secrets
-
-安全提示：
-- Cookie 含敏感信息，请妥善保管，不要提交到仓库
-- 建议优先使用扫码登录并在完成后尽快关闭浏览器
-
-### 1. Fork 仓库
-
-点击右上角的 **"Fork"** 按钮，将此仓库复制到您的 GitHub 账户。
-
-### 2. 获取百度网盘 Cookies
-
-1. 登录 [百度网盘网页版](https://pan.baidu.com)
-2. 按 `F12` 打开开发者工具
-3. 进入 `Application` → `Cookies` → `https://pan.baidu.com`
-4. 找到 `BDUSS` 和 `STOKEN` 的值
-5. 按格式组合：`BDUSS=xxx; STOKEN=xxx`
-
-### 3. 配置企业微信机器人（可选）
-
-1. 登录企业微信管理后台
-2. 进入"应用管理"→"自建"→"群机器人"
-3. 创建机器人并获取 Webhook 地址
-4. 将机器人添加到目标群聊
-
-## ⚙️ 详细配置
-
-### 本地配置文件 config.json（优先级高于环境变量）
-
-支持在项目根目录提供 `config.json`，程序将优先读取本地配置；仅当文件缺失时，才会回退到环境变量方案。若文件存在但内容非法或缺少必需字段，程序会直接报错。
-
-- 文件路径：`./config.json`
-- 字段别名兼容：
-  - `cookies` 或 `BAIDU_COOKIES`：百度网盘 Cookies（至少包含 BDUSS 与 STOKEN），例如 `BDUSS=...; STOKEN=...`
-  - `share_urls` 或 `SHARE_URLS`：分享链接集合，支持数组、对象数组或字符串
-  - `save_dir` 或 `SAVE_DIR`：保存目录，默认 `/AutoTransfer`
-  - `wechat_webhook` 或 `WECHAT_WEBHOOK`：企业微信机器人 Webhook，可选
-- 统一加载规则：
-  - 本地配置优先；仅当 `config.json` 不存在时才回退到环境变量
-  - `share_urls` 为字符串时，支持逗号或换行分隔，程序会统一归一化
-  - `share_urls` 为对象数组时，会保留每个链接自己的 `save_dir`、`folder_filter`、`exclude_folder_filter`、`regex_pattern`、`regex_replace`
-  - 顶层 `folder_filter`、`exclude_folder_filter`、`regex_pattern`、`regex_replace` 会作为默认值应用到未单独配置的链接
-
-**示例 1：简单配置**
-```json
-{
-  "cookies": "BDUSS=xxx; STOKEN=xxx",
-  "share_urls": [
-    "https://pan.baidu.com/s/xxxxxx?pwd=abcd",
-    "https://pan.baidu.com/s/yyyyyy?pwd=efgh /保存目录/子目录"
-  ],
-  "save_dir": "/AutoTransfer",
-  "wechat_webhook": ""
-}
-```
-
-**示例 2：简化配置（全局高级参数）**
-```json
-{
-  "cookies": "BDUSS=xxx; STOKEN=xxx",
-  "share_urls": [
-    "https://pan.baidu.com/s/xxxxxx?pwd=abcd /资料",
-    "https://pan.baidu.com/s/yyyyyy?pwd=efgh /视频"
-  ],
-  "save_dir": "/AutoTransfer",
-  "folder_filter": "2024|2025",
-  "regex_pattern": ".*\\.pdf$",
-  "wechat_webhook": ""
-}
-```
-- 所有链接都会应用 `folder_filter` 和 `regex_pattern`（只转存 2024 或 2025 文件夹中的 PDF 文件）
-
-**示例 3：高级配置（每个链接单独配置）**
-```json
-{
-  "cookies": "BDUSS=xxx; STOKEN=xxx",
-  "share_urls": [
-    {
-      "share_url": "https://pan.baidu.com/s/xxxxxx?pwd=abcd",
-      "save_dir": "/资料",
-      "folder_filter": "2024|2025",
-      "regex_pattern": ".*\\.pdf$"
-    },
-    {
-      "share_url": "https://pan.baidu.com/s/yyyyyy?pwd=efgh",
-      "save_dir": "/视频",
-      "folder_filter": ["^课程", ".*资料.*"],
-      "exclude_folder_filter": "预告|花絮",
-      "regex_pattern": ".*课程(\\d+).*\\.mp4$",
-      "regex_replace": "第\\1课.mp4"
-    }
-  ],
-  "save_dir": "/AutoTransfer",
-  "wechat_webhook": ""
-}
-```
-
-**示例 4：混合配置（全局参数 + 局部覆盖）**
-```json
-{
-  "cookies": "BDUSS=xxx; STOKEN=xxx",
-  "share_urls": [
-    {
-      "share_url": "https://pan.baidu.com/s/xxxxxx?pwd=abcd",
-      "save_dir": "/资料"
-    },
-    {
-      "share_url": "https://pan.baidu.com/s/yyyyyy?pwd=efgh",
-      "save_dir": "/视频",
-      "folder_filter": "2023"
-    }
-  ],
-  "save_dir": "/AutoTransfer",
-  "folder_filter": "2024|2025",
-  "wechat_webhook": ""
-}
-```
-- 第一个链接未单独设置 `folder_filter`，会继承全局 `"2024|2025"`
-- 第二个链接单独设置了 `"2023"`，会覆盖全局规则
-
-**配置说明：**
-- `share_urls` 为字符串时，支持用逗号或换行分隔，程序会自动归一化为按行处理
-- `share_urls` 为数组时，每个元素可以是字符串或对象
-- **全局高级参数**（推荐简化配置）：
-  - 在顶层设置 `folder_filter`、`exclude_folder_filter`、`regex_pattern`、`regex_replace`，会自动应用到所有链接
-  - 如果某个链接单独指定了这些参数，则以链接的配置为准（覆盖全局设置）
-- **对象格式支持**：
-  - `share_url`：分享链接（必需）
-  - `pwd`：提取码（可选）
-  - `save_dir`：保存目录（可选）
-  - `folder_filter`：文件夹过滤规则（可选，正则表达式或列表，覆盖全局设置）
-  - `exclude_folder_filter`：排除文件夹规则（可选，正则表达式或列表，覆盖全局设置）
-  - `regex_pattern`：文件正则表达式（可选，用于文件过滤和重命名，覆盖全局设置）
-  - `regex_replace`：文件正则替换（可选，覆盖全局设置）
-- 保存目录不存在时会自动创建
-- `folder_filter`：只转存匹配的文件夹及其内容
-- `exclude_folder_filter`：跳过匹配的文件夹及其内容
-- `regex_pattern` 和 `regex_replace`：用于文件过滤和重命名；替换分组使用 Python `re.sub()` 语法（如 `\\1`、`\\2`）
-
-
-### 必需配置
-
-在 `Settings` → `Secrets and variables` → `Actions` 中添加：
-
-| Secret Name | 描述 | 示例 |
-|------------|------|------|
-| **`BAIDU_COOKIES`** | 百度网盘 cookies | `BDUSS=your_value; STOKEN=your_value` |
-| **`SHARE_URLS`** | 分享链接列表 | 见下方示例 |
-
-**SHARE_URLS 示例格式：**
-```text
-https://pan.baidu.com/s/1NXEVkmQFfTeB9gvgBYdX0A?pwd=f9c7
-https://pan.baidu.com/s/1example2?pwd=5678 /保存目录/子文件夹
-https://pan.baidu.com/s/1example3?pwd=abcd /我的文件/资料
-```
-
-### 可选配置
-
-| Secret Name | 描述 | 默认值 |
-|------------|------|--------|
-| **`SAVE_DIR`** | 默认保存目录 | `/AutoTransfer` |
-| **`WECHAT_WEBHOOK`** | 企业微信 Webhook | 无 |
-| **`TRANSFERSHARE_STATE_KEY`** | 加密跨 run 失败清单的密钥；未配置时不持久化历史失败状态 | 无 |
-
-> 失败清单可能包含分享链接、提取码和文件路径。GitHub Actions 只会缓存 `.transfershare_failed_transfers.json.enc`，不会缓存明文失败清单。可用 `openssl rand -base64 32` 生成 `TRANSFERSHARE_STATE_KEY`。
-
-### ⚡ 性能调优（可选）
-
-所有性能相关环境变量都有合理默认值，仅在已观察到瓶颈时才需要调整。
-
-| 环境变量 | 默认值 | 说明 |
-|---|---|---|
-| `TRANSFERSHARE_MULTI_SHARE_CONCURRENCY` | `1` | 多链接并发转存 worker 数。`>1` 让多个独立分享的流水线重叠；建议 ≤ 4，过高会触发百度 `error_code: -65` 限频 |
-| `TRANSFERSHARE_LOCAL_SCAN_CONCURRENCY` | `1` | 本地目录扫描并发 worker 数。多个独立子目录扫描可并行 |
-| `TRANSFERSHARE_RENAME_CONCURRENCY` | `1` | 重命名并发 worker 数。`>1` 显著加速大量文件的重命名 |
-| `TRANSFERSHARE_TRANSFER_PIPELINE` | `1` | 流水线双缓冲开关，`0` 退回到同步实现 |
-| `TRANSFERSHARE_PCS_POOL_MAXSIZE` | 自动 | HTTPAdapter 连接池容量；自动按 `max(32, MULTI*FANOUT)` 决定，GA 环境 +8。显式设 `0` 可禁用连接池调优 |
-| `TRANSFERSHARE_PCS_POOL_FANOUT` | `4` | 每个并发链接预留的连接数倍率，仅在自动模式下生效 |
-| `TRANSFERSHARE_PCS_DEBUG_POOL` | `0` | 设 `1` 时在 DEBUG 级别打印每次 API 完成后的连接池状态，便于排查"并发上去了吞吐没涨"的问题 |
-| `TRANSFERSHARE_BATCH_SHARE_DELAY` | `0` | 链接间软节流（秒）。仅在并发触发限频时调高 |
-| `TRANSFERSHARE_RENAME_DELAY` | `0` | 重命名间软节流（秒）。仅在 rename 触发限频时调高 |
-
-并发改造之间是相互独立的；推荐启用顺序：先开 `TRANSFERSHARE_RENAME_CONCURRENCY=4`（最直接的耗时降幅），再开 `TRANSFERSHARE_MULTI_SHARE_CONCURRENCY=2~4`，最后视情况调 `TRANSFERSHARE_PCS_POOL_MAXSIZE`。
-
-## ▶️ 使用方法
-
-### 自动执行
-
-工作流会每六小时自动运行一次（UTC 时间的 0:17、6:17、12:17、18:17，即每 6 小时的第 17 分钟）。
-
-GitHub Actions 运维与安全说明：
-- 转存 workflow 配置了并发锁，同一分支的新转存不会取消正在运行的任务，避免同时写入失败清单和目标目录状态。
-- checkout 使用 `persist-credentials: false`，workflow 只授予 `permissions: contents: read`。
-- 测试 workflow 使用 `actionlint` 校验 Actions 语法，并在 Python 3.9 与 Python 3.12 的 matrix 上运行单测（最低 / 最高版本）。
-- 定时转存脚本第一次运行超时为 7 分钟，失败后等待 5 秒重试，第二次运行超时为 10 分钟。
-- 失败清单只通过 `.transfershare_failed_transfers.json.enc` 加密缓存；未配置 `TRANSFERSHARE_STATE_KEY` 时不跨 run 保存或恢复历史失败状态。
-- Cookie 输出默认脱敏，`--show-full-cookie` 只建议在可信本地终端临时排查时使用。
-
-### 手动执行
-
-1. 进入 `Actions` 标签
-2. 选择 "Baidu Transfer Task" 工作流
-3. 点击 "Run workflow" 按钮
-4. 选择分支（通常是 master）
-5. 点击绿色的 "Run workflow" 按钮
-
-### 本地运行
-
-```bash
-# 初始化 BaiduPCS-Py 子模块并安装依赖
-git submodule update --init --recursive
-pip install -r requirements.txt
-./scripts/build_baidupcs_submodule.sh
-
-# 如需使用本地配置文件，准备 config.json
-# 或者设置环境变量后直接运行
-export BAIDU_COOKIES="BDUSS=xxx; STOKEN=xxx"
-export SHARE_URLS="https://pan.baidu.com/s/xxxxxxxx?pwd=abcd /保存目录"
-export WECHAT_WEBHOOK="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxxxxxxx"
-
-# 执行主任务（推荐，会自动构建子模块扩展并设置 PYTHONPATH）
-./scripts/run_transfer_task.sh
-```
-
-## 🔗 分享链接格式说明
-
-### 支持的格式
-
-```
-https://pan.baidu.com/s/xxxxxxxxxx?pwd=xxxx
-```
-
-### 使用示例
-
-```
-https://pan.baidu.com/s/1NXEVkmQFfTeB9gvgBYdX0A?pwd=f9c7
-https://pan.baidu.com/s/1example2?pwd=5678 /保存目录/子文件夹
-https://pan.baidu.com/s/1example3?pwd=abcd /我的文件/资料
-```
-
-### 保存目录规则
-
-- 不指定目录：使用 `SAVE_DIR` 默认值
-- 指定目录：必须以 `/` 开头
-- 自动创建：目录不存在时会自动创建
-
-## 🎯 高级功能
-
-### 文件夹过滤
-
-支持在转存共享文件夹时，只转存符合要求的文件夹及其内容：
-
-**功能说明：**
-- `folder_filter`：文件夹过滤规则（可选）
-  - **正则表达式字符串**：只转存文件夹名称匹配的文件夹
-  - **列表**：包含多个正则表达式，任一匹配即可转存
-  - **None 或不设置**：不过滤，转存所有文件夹
-
-**使用示例：**
-
-**示例 1：只转存特定年份的文件夹**
-```json
-{
-  "share_urls": [
-    {
-      "share_url": "https://pan.baidu.com/s/xxxxx?pwd=abcd",
-      "save_dir": "/资料",
-      "folder_filter": "2024|2025"
-    }
-  ]
-}
-```
-- 只转存文件夹名称包含 "2024" 或 "2025" 的文件夹
-- 例如：`2024年课程`、`2025年资料` 会被转存
-- 例如：`2023年课程` 会被跳过
-
-**示例 2：使用多个正则表达式**
-```json
-{
-  "share_urls": [
-    {
-      "share_url": "https://pan.baidu.com/s/xxxxx?pwd=abcd",
-      "save_dir": "/资料",
-      "folder_filter": ["^课程", ".*资料.*"]
-    }
-  ]
-}
-```
-- 转存文件夹名称以 "课程" 开头的文件夹
-- 或文件夹名称包含 "资料" 的文件夹
-
-**示例 3：结合文件过滤和文件夹过滤**
-```json
-{
-  "share_urls": [
-    {
-      "share_url": "https://pan.baidu.com/s/xxxxx?pwd=abcd",
-      "save_dir": "/资料",
-      "folder_filter": "2024",
-      "regex_pattern": ".*\\.pdf$",
-      "regex_replace": ""
-    }
-  ]
-}
-```
-- 先过滤文件夹：只转存包含 "2024" 的文件夹
-- 再过滤文件：在这些文件夹中，只转存 PDF 文件
-
-**注意事项：**
-- 文件夹过滤是递归的：如果子文件夹被过滤，其所有内容（包括子文件夹和文件）都会被跳过
-- 正则表达式匹配文件夹名称（不包含路径）
-- 如果正则表达式有误，配置校验会失败并退出，避免意外转存全部文件
-
-### 文件过滤与重命名
-
-支持通过正则表达式过滤文件和重命名：
-
-**功能说明：**
-- `regex_pattern`：正则表达式模式，用于匹配文件路径
-- `regex_replace`：替换字符串（可选）
-  - 如果只设置 `regex_pattern`：只转存匹配的文件，不匹配的会被过滤
-  - 如果同时设置 `regex_pattern` 和 `regex_replace`：匹配的文件会被重命名，不匹配的会被过滤
-
-**使用示例：**
-```json
-{
-  "share_urls": [
-    {
-      "share_url": "https://pan.baidu.com/s/xxxxx?pwd=abcd",
-      "save_dir": "/资料",
-      "regex_pattern": ".*课程(\\d+).*\\.mp4$",
-      "regex_replace": "第\\1课.mp4"
-    }
-  ]
-}
-```
-- 只转存匹配 `.*课程(\d+).*\.mp4$` 的文件
-- 将文件名从 `某某课程01第1讲.mp4` 重命名为 `第1课.mp4`
-
-## 🧩 错误收集与上报
-
-项目已统一采用 `utils.handle_error_and_notify` 进行错误处理与上报：
-
-- 统一打印详细上下文与堆栈（含错误类型、信息与 traceback）
-- 可选发送企业微信通知（需配置 `WECHAT_WEBHOOK`）
-- 支持按步骤收集错误并聚合上报：使用 `ErrorCollector` 上下文管理器
-
-示例：
-
-```python
-from utils import ErrorCollector, handle_error_and_notify
-
-notifier = WeChatNotifier(webhook_url)
-
-with ErrorCollector("批量转存", notifier, config) as ec:
-    try:
-        ...  # 业务逻辑
-    except Exception as e:
-        ec.capture(e, "子步骤说明")
-
-# 非聚合场景的统一处理（直接上报并打印）
-try:
-    ...
-except Exception as e:
-    handle_error_and_notify(e, "主任务执行失败", notifier, config, collect=False)
-```
-
-注意：
-- 设置 `collect=False` 时，将直接上报并打印详细错误
-- 在 `with ErrorCollector(...)` 作用域内捕获的错误会被收集，退出时自动聚合发送
-- 为避免重复告警：在 ErrorCollector 作用域内调用 `handle_error_and_notify(..., collect=False)` 仅打印不立即发送，最终以聚合结果发送一次
 
 ## 🛠 故障排除
 
-### 🔴 Cookies 无效
-```
-错误信息: "cookies 无效" 或 "客户端初始化失败"
-解决方法: 重新获取百度网盘的 cookies 并更新 BAIDU_COOKIES
-```
-
-### 🔴 分享链接格式错误
-```
-错误信息: "格式不支持" 或 "链接解析失败"
-解决方法: 检查链接是否为 https://pan.baidu.com/s/xxxxx?pwd=xxxx 格式
-```
-
-### 🔴 分享链接失效
-```
-错误信息: "分享链接已失效" 或 "error_code: 145"
-解决方法: 检查分享链接是否还有效，更新 SHARE_URLS
-```
-
-### 🔴 网络超时/连接失败（GitHub Actions 环境）
-```
-错误信息: TimeoutError / NewConnectionError / MaxRetryError / ConnectionError 等
-表现: HTTPSConnectionPool(host='pan.baidu.com', ...): Max retries exceeded ... Failed to establish a new connection: [Errno 110] Connection timed out
-解决方法:
-  1) 已内置指数退避重试（Actions 环境最多 5 次，延时上限 30s），可多重试几次
-  2) 若频繁出现，可改为本地执行或设法使用可访问外网的 Runner
-  3) 检查目标网络可达性（企业网络策略、地域限制等）
-```
-
-### 🔴 频率限制
-```
-错误信息: "error_code: -65" 或 "触发频率限制"
-解决方法: 等待一段时间后重新运行，或调整执行频率
-```
-
-### 🔴 企业微信通知问题
-```
-错误信息: "企业微信通知发送失败"
-解决方法: 
-  1. 检查 WECHAT_WEBHOOK 是否正确
-  2. 确认机器人已加入目标群聊
-  3. 使用企业微信机器人提供的 webhook 自测，或直接运行 `python transfer_runner.py` 验证通知链路
-```
+| 问题 | 解决方案 |
+|------|---------|
+| Cookies 无效 | 重新获取 Cookies 并更新 `BAIDU_COOKIES` |
+| 分享链接失效 | 检查链接是否仍有效，更新 `SHARE_URLS` |
+| 频率限制 (`error_code: -65`) | 降低并发数或增加节流延迟 |
+| 网络超时 | 已内置指数退避重试，多重试几次；或本地运行 |
+| 企业微信通知失败 | 检查 Webhook URL 是否正确，机器人是否已加入群聊 |
 
 ## ⚠️ 注意事项
 
 <div align="center">
 
-⚠️ **重要提醒**
-
-1. **仅支持** `https://pan.baidu.com/s/xxxxx?pwd=xxxx` 格式
-2. **妥善保管** 百度网盘 cookies，切勿泄露
-3. **合理设置** 执行频率，避免触发百度限制
-4. **确保空间** 百度网盘有足够的存储空间
-5. **合法使用** 确保分享链接的有效性和合法性
+1. 仅支持 `https://pan.baidu.com/s/xxxxx?pwd=xxxx` 格式
+2. 妥善保管 Cookies，切勿泄露或提交到仓库
+3. 合理设置执行频率，避免触发百度限制
+4. 确保百度网盘有足够的存储空间
+5. 确保分享链接的有效性和合法性
 
 </div>
 
 ## 📄 许可证
 
-本项目采用 MIT 许可证。详情请查看 [LICENSE](LICENSE) 文件。
+本项目采用 [MIT 许可证](LICENSE)。
 
 ## 🤝 贡献
 
@@ -571,8 +356,9 @@ except Exception as e:
 
 ---
 
-如果这个项目对您有帮助，请考虑给它一个 ⭐️
+**如果这个项目对你有帮助，请给它一个 ⭐️**
 
 [![GitHub stars](https://img.shields.io/github/stars/Jack261108/transfershare?style=social)](https://github.com/Jack261108/transfershare/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/Jack261108/transfershare?style=social)](https://github.com/Jack261108/transfershare/network/members)
 
 </div>

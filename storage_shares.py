@@ -177,45 +177,46 @@ class SharedPathService:
         last_page_count = 0
         last_page_key = None
 
-        while True:
-            sub_paths = self.client.list_shared_paths(
-                dir_path, uk, share_id, bdstoken, page=page, size=page_size
-            )
-            if isinstance(sub_paths, list):
-                sub_files = sub_paths
-            elif isinstance(sub_paths, dict):
-                sub_files = sub_paths.get("list", [])
-            else:
-                break
+        try:
+            while True:
+                sub_paths = self.client.list_shared_paths(
+                    dir_path, uk, share_id, bdstoken, page=page, size=page_size
+                )
+                if isinstance(sub_paths, list):
+                    sub_files = sub_paths
+                elif isinstance(sub_paths, dict):
+                    sub_files = sub_paths.get("list", [])
+                else:
+                    break
 
-            page_key = tuple(
-                getattr(item, "fs_id", getattr(item, "path", item)) for item in sub_files
-            )
-            if not sub_files:
+                page_key = tuple(
+                    getattr(item, "fs_id", getattr(item, "path", item)) for item in sub_files
+                )
+                if not sub_files:
+                    last_yielded_page = page
+                    total_pages_yielded += 1
+                    last_page_count = 0
+                    yield page, sub_files
+                    break
+                if page_key == last_page_key:
+                    break
+                last_page_key = page_key
                 last_yielded_page = page
                 total_pages_yielded += 1
-                last_page_count = 0
+                last_page_count = len(sub_files)
                 yield page, sub_files
-                break
-            if page_key == last_page_key:
-                break
-            last_page_key = page_key
-            last_yielded_page = page
-            total_pages_yielded += 1
-            last_page_count = len(sub_files)
-            yield page, sub_files
-            if last_page_count < page_size and not probe_on_short:
-                break
-            page += 1
-
-        emit_storage_metric(
-            "shared_dir_pages",
-            dir_path=dir_path,
-            page_size=page_size,
-            pages=total_pages_yielded,
-            last_page=last_yielded_page,
-            last_page_count=last_page_count,
-        )
+                if last_page_count < page_size and not probe_on_short:
+                    break
+                page += 1
+        finally:
+            emit_storage_metric(
+                "shared_dir_pages",
+                dir_path=dir_path,
+                page_size=page_size,
+                pages=total_pages_yielded,
+                last_page=last_yielded_page,
+                last_page_count=last_page_count,
+            )
 
     def iter_shared_dir_children(self, path, uk, share_id, bdstoken):
         dir_path = getattr(path, "path", path)
