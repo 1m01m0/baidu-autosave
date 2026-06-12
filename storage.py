@@ -924,21 +924,11 @@ class BaiduStorage:
             "failed_at": int(time.time()),
         }
 
-    def _split_existing_transfer_items(
-        self,
-        items,
-        target_dir,
-        progress_callback=None,
-        scan_cache=None,
-        force_refresh=False,
-    ):
-        if not target_dir:
-            return [], list(items)
-
+    def _collect_and_normalize_parent_dirs(self, items):
         relative_dirs = set()
         for _, _, clean_path, final_path, _ in items:
             relative_dirs.update(self._candidate_parent_dirs(clean_path, final_path))
-        normalized_relative_dirs = tuple(
+        return tuple(
             sorted(
                 "" if relative_dir in ("", ".") else relative_dir
                 for relative_dir in (
@@ -947,21 +937,30 @@ class BaiduStorage:
                 )
             )
         )
+
+    def _resolve_local_files(
+        self, target_dir, normalized_relative_dirs, progress_callback, scan_cache,
+        force_refresh, narrow_clear,
+    ):
         normalized_target_dir = self.path_service.normalize_path(target_dir)
         cache_key = (normalized_target_dir, normalized_relative_dirs, True)
         if force_refresh and scan_cache is not None:
-            scan_cache.clear()
+            scan_cache.pop(cache_key, None)
         if not force_refresh and scan_cache is not None and cache_key in scan_cache:
-            local_files_dict = scan_cache[cache_key]
-        else:
-            if force_refresh:
+            return scan_cache[cache_key]
+        if force_refresh:
+            if narrow_clear:
+                self._clear_local_files_cache(target_dir, set(normalized_relative_dirs))
+            else:
                 self._clear_local_files_cache(target_dir)
-            local_files_dict = self._scan_local_files_dict(
-                target_dir, progress_callback, set(normalized_relative_dirs)
-            )
-            if scan_cache is not None:
-                scan_cache[cache_key] = local_files_dict
+        local_files_dict = self._scan_local_files_dict(
+            target_dir, progress_callback, set(normalized_relative_dirs)
+        )
+        if scan_cache is not None:
+            scan_cache[cache_key] = local_files_dict
+        return local_files_dict
 
+    def _classify_items_by_md5(self, items, local_files_dict):
         existing_items = []
         missing_items = []
         for item in items:
@@ -996,6 +995,48 @@ class BaiduStorage:
                 missing_items.append(item)
 
         return existing_items, missing_items
+
+    def _split_existing_transfer_items(
+        self,
+        items,
+        target_dir,
+        progress_callback=None,
+        scan_cache=None,
+        force_refresh=False,
+    ):
+        if not target_dir:
+            return [], list(items)
+
+        normalized_relative_dirs = self._collect_and_normalize_parent_dirs(items)
+        local_files_dict = self._resolve_local_files(
+            target_dir, normalized_relative_dirs, progress_callback, scan_cache,
+            force_refresh, narrow_clear=False,
+        )
+        return self._classify_items_by_md5(items, local_files_dict)
+
+    def _verify_existing_for_batch(
+        self,
+        batch_items,
+        target_dir,
+        progress_callback=None,
+        scan_cache=None,
+        force_refresh=False,
+    ):
+        """仅扫描当前失败批次涉及的目标父目录，判断哪些文件已实际转存成功。
+
+        与 ``_split_existing_transfer_items`` 的区别：后者收集所有 items 的
+        clean_path/final_path 的父目录后做完整扫描，而本方法只扫描当前 batch
+        的父目录，减少失败恢复时对大目标目录的重复远端 list。
+        """
+        if not target_dir:
+            return [], list(batch_items)
+
+        normalized_relative_dirs = self._collect_and_normalize_parent_dirs(batch_items)
+        local_files_dict = self._resolve_local_files(
+            target_dir, normalized_relative_dirs, progress_callback, scan_cache,
+            force_refresh, narrow_clear=True,
+        )
+        return self._classify_items_by_md5(batch_items, local_files_dict)
 
     def _ensure_transfer_dirs(self, transfer_list):
         created_dirs = set()

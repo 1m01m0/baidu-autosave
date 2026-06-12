@@ -3020,7 +3020,7 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.storage.client.transfer_shared_paths.side_effect = RuntimeError(
             "error_code: 4, message: 存储好像出问题了，请稍候再试"
         )
-        self.storage._split_existing_transfer_items = Mock(return_value=([], [transfer_item]))
+        self.storage._verify_existing_for_batch = Mock(return_value=([], [transfer_item]))
 
         with (
             patch("storage_transfer_plan.TRANSFER_FAILED_RETRY_ATTEMPTS", 5),
@@ -3055,7 +3055,7 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.storage.client.transfer_shared_paths.side_effect = RuntimeError(
             "error_code: 4, message: 存储好像出问题了，请稍候再试"
         )
-        self.storage._split_existing_transfer_items = Mock(return_value=([], [transfer_list[0]]))
+        self.storage._verify_existing_for_batch = Mock(return_value=([], [transfer_list[0]]))
 
         with (
             patch("storage_transfer_plan.TRANSFER_BATCH_SIZE", 1),
@@ -3084,7 +3084,7 @@ class BaiduStorageFlowTests(unittest.TestCase):
             RequestsJSONDecodeError("Expecting value", "", 0),
             None,
         ]
-        self.storage._split_existing_transfer_items = Mock(return_value=([], [transfer_list[1]]))
+        self.storage._verify_existing_for_batch = Mock(return_value=([], [transfer_list[1]]))
 
         with patch("storage_transfer_plan.time.sleep"):
             success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
@@ -3103,7 +3103,7 @@ class BaiduStorageFlowTests(unittest.TestCase):
         self.storage.path_service.normalize_path.side_effect = lambda path, **kwargs: path
         transfer_item = (1, "/save", "a.txt", "a.txt", False)
         self.storage.client.transfer_shared_paths.side_effect = RuntimeError("error_code: 31066")
-        self.storage._split_existing_transfer_items = Mock(return_value=([], [transfer_item]))
+        self.storage._verify_existing_for_batch = Mock(return_value=([], [transfer_item]))
 
         with (
             patch("storage_transfer_plan.TRANSFER_FAILED_RETRY_ATTEMPTS", 1),
@@ -3137,7 +3137,8 @@ class BaiduStorageFlowTests(unittest.TestCase):
             RequestsJSONDecodeError("Expecting value", "", 0),
             RequestsJSONDecodeError("Expecting value", "", 0),
         ]
-        self.storage._split_existing_transfer_items = Mock(
+        self.storage._split_existing_transfer_items = Mock(return_value=([], [transfer_item]))
+        self.storage._verify_existing_for_batch = Mock(
             side_effect=[([], [transfer_item]), ([completed_item], [])]
         )
 
@@ -3817,6 +3818,189 @@ class BaiduClientAdapterSessionPatchTests(unittest.TestCase):
         self.assertEqual(1, len(info_lines))
         # 同时 cookie lock 已建立
         self.assertIsNotNone(adapter._session_cookie_lock)
+
+
+from storage_metrics import emit_storage_metric
+
+
+class SharedPathServicePaginationSafetyTests(unittest.TestCase):
+    def setUp(self):
+        self.service = SharedPathService(Mock())
+
+    @patch.dict(
+        "os.environ",
+        {
+            "TRANSFERSHARE_SHARED_PAGE_SIZE": "2",
+            "TRANSFERSHARE_SHARED_PAGE_PROBE_ON_SHORT": "1",
+        },
+        clear=False,
+    )
+    def test_probe_on_short_does_not_stop_when_server_caps_page(self):
+        self.service.SHARED_DIR_PAGE_SIZE = 2
+        self.service.SHARED_DIR_PAGE_PROBE_ON_SHORT = True
+        self.service.client.list_shared_paths.side_effect = [
+            {"list": [SimpleNamespace(path="/a/1.txt", fs_id=1)]},
+            {"list": [SimpleNamespace(path="/a/2.txt", fs_id=2)]},
+            {"list": []},
+        ]
+
+        pages = list(self.service._iter_shared_dir_pages("/a", 1, 2, "token"))
+
+        self.assertEqual([1, 2, 3], [page for page, _ in pages])
+        self.assertEqual(3, self.service.client.list_shared_paths.call_count)
+
+    def test_repeated_page_stops_iteration(self):
+        self.service.SHARED_DIR_PAGE_SIZE = 1
+        self.service.client.list_shared_paths.side_effect = [
+            {"list": [SimpleNamespace(path="/a/1.txt", fs_id=1)]},
+            {"list": [SimpleNamespace(path="/a/1.txt", fs_id=1)]},
+        ]
+
+        pages = list(self.service._iter_shared_dir_pages("/a", 1, 2, "token"))
+
+        self.assertEqual(1, len(pages))
+
+
+class SharedPathServiceMetricsTests(unittest.TestCase):
+    def setUp(self):
+        self.service = SharedPathService(Mock())
+        self.service.client = self.service.client
+
+    @patch.dict("os.environ", {"TRANSFERSHARE_STORAGE_METRICS": "1"}, clear=False)
+    @patch("storage_shares.emit_storage_metric", side_effect=emit_storage_metric)
+    def test_iter_shared_dir_children_emits_shared_page_metrics(self, emit_mock):
+        self.service.client.list_shared_paths.side_effect = [
+            {"list": [SimpleNamespace(path="/a/1.txt", is_dir=False, is_file=True, fs_id=1)]},
+            {"list": []},
+        ]
+
+        with patch.object(SharedPathService, "SHARED_DIR_PAGE_SIZE", 1):
+            list(self.service.iter_shared_dir_children("/a", 1, 2, "token"))
+
+        events = [call.args[0] for call in emit_mock.call_args_list]
+        self.assertIn("shared_dir_pages", events)
+
+
+class StoragePathServiceMetricsTests(unittest.TestCase):
+    @patch.dict("os.environ", {"TRANSFERSHARE_STORAGE_METRICS": "1"}, clear=False)
+    @patch("storage_paths.emit_storage_metric", side_effect=emit_storage_metric)
+    def test_list_local_files_in_dirs_emits_local_list_metric(self, emit_mock):
+        client = Mock()
+        client.list.return_value = [
+            SimpleNamespace(is_file=True, is_dir=False, path="/save/A/a.txt", md5="md5-a")
+        ]
+        service = StoragePathService(client)
+
+        service.list_local_files_in_dirs("/save", {"A"}, use_cache=False, merge_dirs=False)
+
+        events = [call.args[0] for call in emit_mock.call_args_list]
+        self.assertIn("local_dir_list", events)
+
+
+class BaiduStorageMetricsFlowTests(unittest.TestCase):
+    def setUp(self):
+        self.storage = BaiduStorage.__new__(BaiduStorage)
+        self.storage.client = Mock()
+        self.storage.wechat_notifier = None
+        self.storage._local_files_cache = {}
+        self.storage.path_service = Mock()
+        self.storage.path_service.normalize_path.side_effect = lambda path, file_only=False: (
+            str(path).replace("\\", "/").strip("/").split("/")[-1]
+            if file_only
+            else str(path).replace("\\", "/").strip("/")
+        )
+        self.storage.share_service = Mock()
+
+    @patch.dict("os.environ", {"TRANSFERSHARE_STORAGE_METRICS": "1"}, clear=False)
+    @patch("storage_transfer_plan.emit_storage_metric", side_effect=emit_storage_metric)
+    @patch("storage_transfer_plan.handle_error_and_notify")
+    @patch("storage_transfer_plan.time.sleep")
+    def test_execute_transfer_plan_emits_rate_limit_sleep_metric(
+        self, sleep, notify, emit_mock
+    ):
+        transfer_item = TransferItem(1, "/save", "a.txt", "a.txt", False, "md5-a")
+        self.storage.client.transfer_shared_paths.side_effect = [
+            RuntimeError("error_code: -65"),
+            None,
+        ]
+        self.storage._scan_local_files_dict = Mock(return_value={})
+
+        with patch("storage_transfer_plan.RATE_LIMIT_WAIT_TIME", 10):
+            self.storage._execute_transfer_plan(
+                [transfer_item], "url", 1, 2, "token", "/save"
+            )
+
+        events = [call.args[0] for call in emit_mock.call_args_list]
+        self.assertIn("rate_limit_sleep", events)
+
+
+class BatchLocalRecoveryVerificationTests(unittest.TestCase):
+    def setUp(self):
+        self.storage = BaiduStorage.__new__(BaiduStorage)
+        self.storage.client = Mock()
+        self.storage.wechat_notifier = None
+        self.storage._local_files_cache = {}
+        self.storage.path_service = Mock()
+        self.storage.path_service.normalize_path.side_effect = lambda path, file_only=False: path
+        self.storage.share_service = Mock()
+
+    def test_verify_existing_for_batch_calls_scan_with_batch_parents_only(self):
+        items = [
+            TransferItem(1, "/save", "A/1.txt", "A/1.txt", False, "md5-a"),
+            TransferItem(2, "/save", "B/2.txt", "B/2.txt", False, "md5-b"),
+        ]
+        self.storage._scan_local_files_dict = Mock(return_value={"A/1.txt": "md5-a"})
+
+        existing, missing = self.storage._verify_existing_for_batch(items, "/save")
+
+        self.assertEqual([items[0]], existing)
+        self.assertEqual([items[1]], missing)
+        self.storage._scan_local_files_dict.assert_called_once_with("/save", None, {"A", "B"})
+
+    def test_execute_transfer_plan_uses_batch_local_verify_on_failure(self):
+        transfer_list = [
+            TransferItem(1, "/save", "A/1.txt", "A/1.txt", False, "md5-a"),
+            TransferItem(2, "/save", "B/2.txt", "B/2.txt", False, "md5-b"),
+        ]
+        self.storage.client.transfer_shared_paths.side_effect = [
+            RuntimeError("boom"),
+            None,
+        ]
+        self.storage._verify_existing_for_batch = Mock(return_value=([transfer_list[0]], [transfer_list[1]]))
+
+        with patch("storage_transfer_plan.time.sleep"):
+            success_count, successful_items, failed_items = self.storage._execute_transfer_plan(
+                transfer_list, "url", 1, 2, "token", "/save"
+            )
+
+        self.assertEqual(1, success_count)
+        self.assertEqual([transfer_list[0]], successful_items)
+        self.assertEqual(1, len(failed_items))
+        self.assertEqual(2, failed_items[0]["fs_id"])
+        self.storage._verify_existing_for_batch.assert_called_once()
+
+
+class BatchLocalCacheInvalidationTests(unittest.TestCase):
+    def setUp(self):
+        self.storage = BaiduStorage.__new__(BaiduStorage)
+        self.storage.client = Mock()
+        self.storage.wechat_notifier = None
+        self.storage._local_files_cache = {}
+        self.storage.path_service = Mock()
+        self.storage.path_service.normalize_path.side_effect = lambda path, file_only=False: path
+        self.storage.share_service = Mock()
+        self.storage._clear_local_files_cache = Mock()
+        self.storage._scan_local_files_dict = Mock(return_value={})
+
+    def test_verify_existing_for_batch_clears_only_batch_parent_dirs(self):
+        items = [
+            TransferItem(1, "/save", "A/1.txt", "A/1.txt", False, "md5-a"),
+        ]
+
+        self.storage._verify_existing_for_batch(items, "/save", force_refresh=True)
+
+        self.storage._clear_local_files_cache.assert_called_once_with("/save", {"A"})
+        self.storage._scan_local_files_dict.assert_called_once_with("/save", None, {"A"})
 
 
 if __name__ == "__main__":
