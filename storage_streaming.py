@@ -38,7 +38,7 @@ def transfer_share_streaming(
     progress_callback=None,
 ):
     if progress_callback:
-        progress_callback("info", "【步骤2/4】扫描共享文件并对比本地目录")
+        progress_callback("info", "【步骤2/4】扫描共享文件并过滤")
 
     sentinel = object()
     stream_queue = queue.Queue(maxsize=max(TRANSFER_BATCH_SIZE * 2, 1))
@@ -174,8 +174,6 @@ def transfer_share_streaming(
     def flush_shared_file_batch():
         if not shared_file_batch:
             return None
-
-        _drain_pending_transfer()
 
         candidates, batch_summary, relative_dirs = storage._prepare_transfer_candidates(
             shared_file_batch,

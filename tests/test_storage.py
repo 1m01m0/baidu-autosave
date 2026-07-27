@@ -1286,6 +1286,7 @@ class BaiduStorageFlowTests(unittest.TestCase):
             {"success": True, "skipped": True, "message": "没有新文件需要转存"},
             result,
         )
+        self.storage._scan_local_files_dict.assert_not_called()
 
     def test_transfer_share_returns_dir_error_directly(self):
         self.storage._normalize_save_dir = Mock(return_value="/save")
@@ -1499,6 +1500,80 @@ class BaiduStorageFlowTests(unittest.TestCase):
             share_id=2,
             bdstoken="token",
             shared_url="https://pan.baidu.com/s/abc",
+        )
+
+    def test_transfer_share_streaming_does_not_replan_buffered_duplicate_path(self):
+        self.storage._normalize_save_dir = Mock(return_value="/save")
+        self.storage.path_service.normalize_path.side_effect = lambda path, file_only=False: str(
+            path
+        ).strip("/")
+        entry_context = {
+            "shared_paths": [Mock(is_dir=False)],
+            "uk": 1,
+            "share_id": 2,
+            "bdstoken": "token",
+        }
+        self.storage._load_share_entries = Mock(return_value=entry_context)
+        self.storage.share_service.iter_shared_files.return_value = [
+            {"fs_id": 1, "path": "a.mp4", "md5": "md5-a"},
+            {"fs_id": 2, "path": "skip-1.txt", "md5": "skip-1"},
+            {"fs_id": 3, "path": "b.mp4", "md5": "md5-b"},
+            {"fs_id": 4, "path": "dup.mp4", "md5": "same-md5"},
+            {"fs_id": 5, "path": "c.mp4", "md5": "md5-c"},
+            {"fs_id": 6, "path": "skip-2.txt", "md5": "skip-2"},
+            {"fs_id": 7, "path": "dup.mp4", "md5": "same-md5"},
+            {"fs_id": 8, "path": "skip-3.txt", "md5": "skip-3"},
+        ]
+        self.storage._scan_local_files_dict = Mock(return_value={})
+        self.storage.path_service.ensure_dir_exists.return_value = True
+
+        with patch("storage_streaming.TRANSFER_BATCH_SIZE", 2):
+            result = self.storage.transfer_share(
+                "https://pan.baidu.com/s/abc",
+                regex_pattern=r"\.mp4$",
+            )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(4, result["completed_count"])
+        self.assertEqual(
+            [[1, 3], [4, 5]],
+            [call.kwargs["fs_ids"] for call in self.storage.client.transfer_shared_paths.call_args_list],
+        )
+
+    def test_transfer_share_streaming_does_not_retry_failed_duplicate_record(self):
+        self.storage._normalize_save_dir = Mock(return_value="/save")
+        entry_context = {
+            "shared_paths": [Mock(is_dir=False)],
+            "uk": 1,
+            "share_id": 2,
+            "bdstoken": "token",
+        }
+        self.storage._load_share_entries = Mock(return_value=entry_context)
+        self.storage.share_service.iter_shared_files.return_value = [
+            {"fs_id": 1, "path": "dup.mp4", "md5": "same-md5"},
+            {"fs_id": 2, "path": "other.mp4", "md5": "other-md5"},
+            {"fs_id": 3, "path": "dup.mp4", "md5": "same-md5"},
+        ]
+        self.storage._scan_local_files_dict = Mock(return_value={})
+        self.storage.path_service.ensure_dir_exists.return_value = True
+
+        def execute_plan(transfer_list, *args):
+            if transfer_list[0].fs_id == 1:
+                return 0, [], [{"clean_path": "dup.mp4", "error": "boom"}]
+            return len(transfer_list), list(transfer_list), []
+
+        self.storage._execute_transfer_plan = Mock(side_effect=execute_plan)
+
+        with patch("storage_streaming.TRANSFER_BATCH_SIZE", 1):
+            result = self.storage.transfer_share("https://pan.baidu.com/s/abc")
+
+        self.assertTrue(result["partial"])
+        self.assertEqual(
+            [[1], [2]],
+            [
+                [item.fs_id for item in call.args[0]]
+                for call in self.storage._execute_transfer_plan.call_args_list
+            ],
         )
 
     def test_transfer_share_streaming_preserves_regex_rename(self):
